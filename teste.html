@@ -1,12 +1,99 @@
-tsadsadsadsd
-ad
-sa
-dsa
-dsa
-d
-sa
-dsa
-dsa
-d
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgroTech</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f5f5f5;
+            margin: 0;
+            padding: 0;
+        }
 
-s
+        /* CABEÇALHO */
+        header {
+            background-color: #3B6D11;
+            color: white;
+            padding: 20px 40px;
+            text-align: center;
+        }
+
+        /* CONTEÚDO CENTRAL */
+        main {
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 20px;
+        }
+
+        /* 3 CARDS LADO A LADO */
+        .grade {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+        }
+
+        /* CADA CARD */
+        .card {
+            background-color: white;
+            border-radius: 12px;
+            padding: 20px;
+            width: 200px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .card img {
+            width: 100%;
+            border-radius: 8px;
+        }
+
+        .card h3 { color: #3B6D11; margin: 10px 0 5px; }
+        .card p  { color: #777; font-size: 14px; }
+
+        /* RODAPÉ */
+        footer {
+            background-color: #3B6D11;
+            color: white;
+            text-align: center;
+            padding: 15px;
+            margin-top: 60px;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>🌱 AgroTech</h1>
+        <p>Tecnologia no campo</p>
+    </header>
+
+    <main>
+        <h2 style="text-align:center; color:#3B6D11;">Nossos Produtos</h2>
+
+        <div class="grade">
+            <div class="card">
+                <img src="https://picsum.photos/200/120?random=1" alt="Produto 1">
+                <h3>Sementes</h3>
+                <p>Alta qualidade e produtividade</p>
+            </div>
+            <div class="card">
+                <img src="https://picsum.photos/200/120?random=2" alt="Produto 2">
+                <h3>Equipamentos</h3>
+                <p>Tecnologia de ponta no campo</p>
+            </div>
+            <div class="card">
+                <img src="https://picsum.photos/200/120?random=3" alt="Produto 3">
+                <h3>Defensivos</h3>
+                <p>Produtos orgânicos sustentáveis</p>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>© 2025 AgroTech — Todos os direitos reservados</p>
+    </footer>
+
+</body>
+</html>
