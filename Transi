@@ -1,3 +1,8 @@
-Get-WinEvent -LogName System -MaxEvents 30 | Where-Object {$_.Message -like "*BFE*" -or $_.Message -like "*Filtragem*" -or $_.Message -like "*Filtering*"} | Format-List TimeCreated, Id, Message
-Get-Item "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" | Select-Object -ExpandProperty Property
-Get-Service | Where-Object {$_.DisplayName -match "McAfee|Trend|Symantec|CrowdStrike|SentinelOne|Defender|Sophos|Carbon|Cortex|Cylance"}
+Agora refente ao SSD ITIPRD0597 que se encontra na sala do DTI:
+
+Depois que a máquina foi ligada pela primeira vez com a nova imagem do Windows, ela não responde quando outras máquinas tentam pingar ela. A própria máquina consegue pingar outros servidores normalmente, só não consegue ser "vista" de fora.
+
+Então O Firewall do Windows não está conseguindo ligar. Quando tento iniciar ele manualmente, dá erro de tempo esgotado (ele tenta por 30 segundos e desiste). Como o firewall não sobe, o serviço que ele depende (chamado BFE) também não sobe, e isso faz a máquina bloquear o ping por segurança.
+
+A máquina tem o CrowdStrike (Falcon) instalado e rodando — é o antivírus/proteção da empresa. Existe uma suspeita forte de que ele está "brigando" com o Firewall do Windows nesse primeiro boot da máquina, e por isso o Firewall não consegue subir.
+Eu tentei reiniciar o serviço do CrowdStrike pra ver se resolvia, mas ele não deixa ser parado — isso é uma proteção normal dele contra alteração indevida, então não dá pra eu mexer nisso por fora. Precisa ser verificado pelo pessoal que administra o CrowdStrike.
