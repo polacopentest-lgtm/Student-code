@@ -1,1 +1,2 @@
 Get-WinEvent -LogName System -MaxEvents 30 | Where-Object {$_.Message -like "*BFE*" -or $_.Message -like "*Filtragem*" -or $_.Message -like "*Filtering*"} | Format-List TimeCreated, Id, Message
+Get-Item "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" | Select-Object -ExpandProperty Property
