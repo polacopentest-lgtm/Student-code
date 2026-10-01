@@ -1,0 +1,111 @@
+# inciio
+$ComputerName = Read-Host "Qual a máquina?"
+Write-Host "Selecionado: $ComputerName"
+
+function Show-Menu {
+    Write-Host "Como posso te ajudar hoje ?"
+    Write-Host "1 - Informações da máquina"
+    Write-Host "2 - Última vez que foi desligado (uptime)"
+    Write-Host "3 - Última vez que o sistema foi ligado"
+    Write-Host "4 - Listar processos ativos"
+    Write-Host "5 - Serviços ativos"
+    Write-Host "6 - Verificar se é SSD ou HD"
+    Write-Host "7 - Eventos de desligamento inesperado"
+    Write-Host "8 - Últimos erros do log de sistema"
+    Write-Host "9 - Analisar falhas de energia"
+    Write-Host "A - Checar uso de CPU e memória"
+    Write-Host "B - Verificar espaço em disco"
+    Write-Host "C - Checar integridade do sistema"
+    Write-Host "D - Serviços parados e erros de drivers"
+    Write-Host "E - Procurar erros físicos e lógicos no disco"
+    Write-Host "F - Checar integridade do sistema"
+    Write-Host "G - Corrigir arquivos corrompidos do Windows"
+    Write-Host "0 - Sair"
+}
+
+do {
+    Clear-Host
+    Show-Menu
+    $choice = Read-Host "Escolha a opção"
+
+    switch ($choice) {
+        1 { Get-ComputerInfo; Read-Host "Pressione Enter para voltar ao menu" }
+        2 { Get-CimInstance Win32_OperatingSystem | Select-Object LastBootUpTime; Read-Host "Pressione Enter para voltar ao menu" }
+        3 { Get-CimInstance Win32_OperatingSystem | Select-Object LastBootUpTime; Read-Host "Pressione Enter para voltar ao menu" }
+        4 { Get-Process; Read-Host "Pressione Enter para voltar ao menu" }
+        5 { Get-Service | Where-Object {$_.Status -eq "Running"}; Read-Host "Pressione Enter para voltar ao menu" }
+        6 { Get-PhysicalDisk | Select FriendlyName, MediaType; Read-Host "Pressione Enter para voltar ao menu" }
+        7 { Get-WinEvent -LogName System | Where-Object {$_.Id -eq 41}; Read-Host "Pressione Enter para voltar ao menu" }
+        8 { Get-EventLog -LogName System -EntryType Error -Newest 20; Read-Host "Pressione Enter para voltar ao menu" }
+        9 { Get-WinEvent -LogName System | Where-Object {$_.Id -eq 12 -or $_.Id -eq 13}; Read-Host "Pressione Enter para voltar ao menu" }
+        "A" { Get-Process | Sort-Object CPU -Descending | Select-Object -First 10; Get-Counter '\Memory\Available MBytes'; Read-Host "Pressione Enter para voltar ao menu" }
+        "B" { Get-PSDrive -PSProvider FileSystem; Read-Host "Pressione Enter para voltar ao menu" }
+        "C" { sfc /scannow; Read-Host "Pressione Enter para voltar ao menu" }
+        "D" { Get-Service | Where-Object {$_.Status -eq "Stopped"}; Get-WinEvent -LogName System | Where-Object {$_.Id -eq 219}; Read-Host "Pressione Enter para voltar ao menu" }
+        "E" { chkdsk C: /f /r; Read-Host "Pressione Enter para voltar ao menu" }
+        "F" { sfc /scannow; Read-Host "Pressione Enter para voltar ao menu" }
+        "G" { DISM /Online /Cleanup-Image /RestoreHealth; Read-Host "Pressione Enter para voltar ao menu" }
+        0 { Write-Host "Saindo..." }
+        default { Write-Host "Opção inválida!"; Read-Host "Pressione Enter para voltar ao menu" }
+    }
+} while ($choice -ne 0)
+
+
+
+
+obs: para o claude. 
+
+✅ O que já está pronto
+Menu interativo em PowerShell (.ps1) com várias opções de diagnóstico.
+
+Loop do { } while funcionando para repetir até você digitar 0.
+
+Comandos locais implementados (CPU, memória, disco, eventos, serviços, etc).
+
+Ajuste para dar sequência: limpar tela (Clear-Host) e pausar com Read-Host "Pressione Enter para voltar ao menu".
+
+📌 O que você disse que quer implementar
+Banco de dados CSV
+
+Criar um arquivo maquinas.csv com colunas: Host, Setor, IP.
+
+Integrar ao script com Import-Csv.
+
+Ao digitar o host, mostrar setor/IP antes de abrir o menu.
+
+Execução remota
+
+Substituir comandos locais por Invoke-Command -ComputerName $ComputerName.
+
+Assim, os diagnósticos rodam na máquina escolhida, não só no seu PC.
+
+Sistema de login
+
+Tela inicial pedindo usuário (ex: sbp61176) e senha.
+
+Validar antes de liberar o menu.
+
+Logs automáticos
+
+Gerar um arquivo .log registrando:
+
+Usuário logado
+
+Máquina escolhida
+
+Setor/IP
+
+Comando executado
+
+Data/hora
+
+🚀 Linha de evolução
+Hoje: menu interativo pronto e funcionando localmente, com pausa e sequência corrigida.
+
+Próximo passo: criar o arquivo maquinas.csv e integrar ao script.
+
+Depois: adaptar para execução remota com Invoke-Command.
+
+Em seguida: implementar login.
+
+Por fim: implementar logs automáticos.
