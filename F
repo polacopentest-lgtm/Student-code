@@ -1,1 +1,3 @@
-chrome-native://pdf/link?url=content%3A%2F%2Fmedia%2Fexternal%2Fdownloads%2F195316
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='NAMSSO'} -MaxEvents 3000 |
+ Where-Object { $_.Message -notmatch 'ServiceControlHandlerEx' } |
+ Select-Object -First 40 TimeCreated, LevelDisplayName, Message | Format-List
