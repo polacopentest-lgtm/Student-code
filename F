@@ -5,3 +5,16 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='NAMSSO'} -M
 
 
 Get-NetAdapterBinding | Where-Object DisplayName -like "*AnyConnect*"
+
+
+
+
+Get-Service nam, wlansvc, dot3svc | Select Name, Status, StartType
+sc.exe query acnamfd
+
+
+$b="C:\Program Files (x86)\Cisco\Cisco AnyConnect Secure Mobility Client"
+Get-ChildItem $b -Recurse -File | Select @{n='Arq';e={$_.FullName.Substring($b.Length)}}, Length | Sort Arq | Export-Csv "$env:USERPROFILE\Desktop\$env:COMPUTERNAME.csv" -NoTypeInformation
+
+Compare-Object (Import-Csv .\HABINTBLMO0009.csv) (Import-Csv .\HABINTBLMO0016.csv) -Property Arq, Length
+
