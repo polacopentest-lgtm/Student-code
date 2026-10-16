@@ -1,3 +1,7 @@
 Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='NAMSSO'} -MaxEvents 3000 |
  Where-Object { $_.Message -notmatch 'ServiceControlHandlerEx' } |
  Select-Object -First 40 TimeCreated, LevelDisplayName, Message | Format-List
+
+
+
+Get-NetAdapterBinding | Where-Object DisplayName -like "*AnyConnect*"
