@@ -29,3 +29,18 @@ $sb = { param($paths) foreach ($b in $paths) { Get-ChildItem $b -Recurse -File -
 $local  = & $sb $paths | Select Arq, Length
 $remoto = Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock $sb -ArgumentList (,$paths) | Select Arq, Length
 Compare-Object $local $remoto -Property Arq, Length | Sort Arq | Format-Table -AutoSize
+
+
+
+
+
+
+$sb = {
+  $ext = '\.(dll|sys|exe|xml|inf|cat|msi|dat|ini|json)$'
+  Get-ChildItem "C:\Program Files (x86)\Cisco\Cisco AnyConnect Secure Mobility Client","C:\ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client" -Recurse -File -ErrorAction SilentlyContinue |
+   Where-Object { $_.Extension -match $ext } |
+   Select @{n='Arq';e={ ($_.FullName -replace 'C:\\Program Files \(x86\)\\Cisco\\Cisco AnyConnect Secure Mobility Client','PF') -replace 'C:\\ProgramData\\Cisco\\Cisco AnyConnect Secure Mobility Client','PD' }}, Length
+}
+$local  = & $sb
+$remoto = Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock $sb | Select Arq, Length
+Compare-Object $local $remoto -Property Arq, Length | Sort Arq | Select SideIndicator, Arq, Length | Format-Table -AutoSize -Wrap
