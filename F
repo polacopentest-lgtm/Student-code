@@ -44,3 +44,9 @@ $sb = {
 $local  = & $sb
 $remoto = Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock $sb | Select Arq, Length
 Compare-Object $local $remoto -Property Arq, Length | Sort Arq | Select SideIndicator, Arq, Length | Format-Table -AutoSize -Wrap
+
+
+
+
+sc.exe query acnamfd
+pnputil /enum-drivers | Select-String -Context 2,4 "acnamfd|Cisco"
