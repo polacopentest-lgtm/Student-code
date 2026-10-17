@@ -18,3 +18,14 @@ Get-ChildItem $b -Recurse -File | Select @{n='Arq';e={$_.FullName.Substring($b.L
 
 Compare-Object (Import-Csv .\HABINTBLMO0009.csv) (Import-Csv .\HABINTBLMO0016.csv) -Property Arq, Length
 
+
+
+
+
+
+$paths = "C:\Program Files (x86)\Cisco\Cisco AnyConnect Secure Mobility Client",
+         "C:\ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client"
+$sb = { param($paths) foreach ($b in $paths) { Get-ChildItem $b -Recurse -File -ErrorAction SilentlyContinue | Select @{n='Arq';e={$_.FullName}}, Length } }
+$local  = & $sb $paths | Select Arq, Length
+$remoto = Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock $sb -ArgumentList (,$paths) | Select Arq, Length
+Compare-Object $local $remoto -Property Arq, Length | Sort Arq | Format-Table -AutoSize
