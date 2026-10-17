@@ -61,3 +61,18 @@ Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock {
   sc.exe query acnamfd
   pnputil /enum-drivers | Select-String -Context 2,4 "acnamfd"
 }
+
+.
+.
+
+$sb={ Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*,HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* | ? DisplayName | Select -Expand DisplayName | Sort }
+Compare-Object (& $sb) (Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock $sb)
+
+
+
+Get-CimInstance Win32_PnPSignedDriver | ? DeviceName -like "*Network Access Manager*" | Select DeviceName, DriverVersion, DriverDate
+Invoke-Command -ComputerName HABINTBLMO0016 { Get-CimInstance Win32_PnPSignedDriver | ? DeviceName -like "*Network Access Manager*" | Select DeviceName, DriverVersion, DriverDate }
+
+
+
+
