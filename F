@@ -50,3 +50,14 @@ Compare-Object $local $remoto -Property Arq, Length | Sort Arq | Select SideIndi
 
 sc.exe query acnamfd
 pnputil /enum-drivers | Select-String -Context 2,4 "acnamfd|Cisco"
+
+
+
+
+
+
+Test-WSMan HABINTBLMO0016
+Invoke-Command -ComputerName HABINTBLMO0016 -ScriptBlock {
+  sc.exe query acnamfd
+  pnputil /enum-drivers | Select-String -Context 2,4 "acnamfd"
+}
