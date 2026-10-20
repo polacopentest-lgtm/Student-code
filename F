@@ -85,5 +85,12 @@ Invoke-Command -ComputerName HABINTBLMO0016 {
  Get-WinEvent -LogName Application -MaxEvents 20000 |
  ? { $_.ProviderName -like 'NAM*' -and $_.Message -match '%NAM\w*-[0-5]-|adapter|filter|driver' -and $_.Message -notmatch 'ServiceControlHandlerEx' } |
  Select -First 40 TimeCreated, ProviderName, Message | Format-List
+
+k
+j
+k
+k
+
+https://pt.scribd.com/document/689702855/PowerFocus4000-codigos-erros
 }
 
