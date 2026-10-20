@@ -166,4 +166,82 @@ try {
 catch {
     Write-Host "❌ Ocorreu um erro ao processar a string. Verifique se o formato enviado está correto." -ForegroundColor Red
 }
+kk
+k
+k
+k
+k
+k
+k
+
+# Limpa a tela para começar organizado
+Clear-Host
+
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+$InputUser = Read-Host "👉 Cole ou digite a sequência do MID 0035 aqui"
+Write-Host "--------------------------------------------------------" -ForegroundColor Yellow
+
+# Limpeza inteligente: remove apenas o caractere '|' e espaços extras, mantendo o padrão numérico
+$Mensagem = $InputUser.Replace("|", "").Trim()
+# Remove múltiplos espaços deixando apenas um espaço simples (caso haja data)
+$Mensagem = $Mensagem -replace '\s+', ' '
+
+try {
+    # 1. Extração do Cabeçalho Básico
+    # Remove espaços temporariamente apenas para decodificar o cabeçalho fixo inicial
+    $StringSemEspacos = $Mensagem.Replace(" ", "")
+    $Comprimento = $StringSemEspacos.Substring(0, 4)
+    $MID         = $StringSemEspacos.Substring(4, 4)
+
+    # 2. Localização Dinâmica dos Parâmetros usando Expressões Regulares (Regex)
+    # Busca o padrão do parâmetro e captura os caracteres seguintes conforme a Tabela 64
+    
+    # ID do Job (Inicia com 01, captura os 2 caracteres seguintes)
+    if ($StringSemEspacos -match '01(\d{2})') { $JobID = $Matches[1] } else { $JobID = "Erro" }
+    
+    # Status do Job (Inicia com 02, captura o próximo 1 caractere)
+    if ($StringSemEspacos -match '02(\d{1})') { $StatusCode = $Matches[1] } else { $StatusCode = "Erro" }
+    
+    # Modo do Lote (Inicia com 03, captura o próximo 1 caractere)
+    if ($StringSemEspacos -match '03(\d{1})') { $ModeCode = $Matches[1] } else { $ModeCode = "Erro" }
+    
+    # Meta do Lote / Batch Size (Inicia com 04, captura os próximos 4 caracteres)
+    if ($StringSemEspacos -match '04(\d{4})') { $BatchSize = [int]$Matches[1] } else { $BatchSize = 0 }
+    
+    # Progresso / Contador (Inicia com 05, captura os próximos 4 caracteres)
+    if ($StringSemEspacos -match '05(\d{4})') { $Counter = [int]$Matches[1] } else { $Counter = 0 }
+
+    # 3. Tradução dos códigos conforme o manual técnico
+    $StatusTexto = switch ($StatusCode) {
+        "0" { "0 (Job não completado / Em andamento)" }
+        "1" { "1 (Job concluído com sucesso - OK)" }
+        "2" { "2 (Job reprovado - NOK)" }
+        default { "$StatusCode (Não identificado)" }
+    }
+
+    $ModoTexto = switch ($ModeCode) {
+        "0" { "0 (Apenas os apertos OK são contados)" }
+        "1" { "1 (Ambos os apertos OK e NOK são contados)" }
+        default { "$ModeCode (Não identificado)" }
+    }
+
+    # 4. Exibição do relatório formatado na tela
+    Write-Host ""
+    Write-Host "================== DETALHES DO MID 0035 ==================" -ForegroundColor Cyan
+    Write-Host "📋 CABEÇALHO DO PROTOCOLO:"
+    Write-Host "   • Tamanho Total: $Comprimento caracteres"
+    Write-Host "   • Tipo do MID:   $MID"
+    Write-Host ""
+    Write-Host "🔩 DADOS DE PRODUÇÃO (POWER FOCUS 4000):"
+    Write-Host "   • ID do Job:      $JobID"
+    Write-Host "   • Status do Job:  $StatusTexto"
+    Write-Host "   • Modo do Lote:   $ModoTexto"
+    Write-Host "   • Meta do Lote:   $BatchSize parafusos"
+    Write-Host "   • Progresso Atual: $Counter parafusos apertados"
+    Write-Host "==========================================================" -ForegroundColor Cyan
+}
+catch {
+    Write-Host "❌ Ocorreu um erro inesperado ao interpretar os dados." -ForegroundColor Red
+}
+
 
