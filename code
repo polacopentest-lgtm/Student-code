@@ -1366,3 +1366,49 @@
 07102026205950 - RECV 00 - 00209999        0000
 07102026205955 - SENT 07 - 00209999            
 07102026205955 - RECV 00 - 00209999        0000
+
+# Limpa o terminal
+Clear-Host
+
+# Caminho do arquivo de texto com os logs (Altere para o local correto do seu arquivo)
+$CaminhoArquivo = "C:\Caminho\Para\Seu\Log.txt"
+
+if (-not (Test-Path $CaminhoArquivo)) {
+    Write-Host "❌ Arquivo de log não foi encontrado no caminho especificado!" -ForegroundColor Red
+    Exit
+}
+
+# Lê todas as linhas do arquivo de log
+$LinhasLog = Get-Content -Path $CaminhoArquivo
+$TotalLinhas = $LinhasLog.Count
+
+Write-Host "================ ANALISANDO ARQUIVO DE LOG ================" -ForegroundColor Cyan
+Write-Host "📊 Total de linhas detectadas: $TotalLinhas"
+
+$ContadorKeepAlive = 0
+$ContadorMid0035 = 0
+
+foreach ($Linha in $LinhasLog) {
+    if ($Linha -match "9999") {
+        $ContadorKeepAlive++
+    }
+    if ($Linha -match "0035") {
+        $ContadorMid0035++
+        Write-Host "🚨 MID 0035 (Job Info) Encontrado na linha:" -ForegroundColor Yellow
+        Write-Host "   ➔ $Linha" -ForegroundColor Gray
+    }
+}
+
+Write-Host ""
+Write-Host "==================== RESULTADO FINAL ====================" -ForegroundColor Cyan
+Write-Host "   • Mensagens Keep Alive (MID 9999): $ContadorKeepAlive" -ForegroundColor Green
+Write-Host "   • Mensagens de Produção (MID 0035): $ContadorMid0035" -ForegroundColor Yellow
+
+if ($ContadorMid0035 -eq 0) {
+    Write-Host ""
+    Write-Host "💡 Análise Técnica: Este trecho de log contém apenas tráfego de checagem de rede (Keep Alive)." -ForegroundColor Gray
+    Write-Host "A parafusadeira permaneceu conectada, mas não houve apertos ou troca de Jobs gravados neste período." -ForegroundColor Gray
+}
+Write-Host "==========================================================" -ForegroundColor Cyan
+
+
