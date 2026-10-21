@@ -1,0 +1,398 @@
+\xEF\xBB\xBF# =====================================================================
+#  ANALISADOR DE LOG - OPEN PROTOCOL (Atlas Copco Power Focus 4000)
+# =====================================================================
+#  O que o script faz:
+#   1. Le o arquivo de log linha por linha
+#   2. Separa cada linha em: data/hora, direcao (SENT/RECV), codigo do log, mensagem
+#   3. Quebra a mensagem em CABECALHO (20 caracteres fixos) + PAYLOAD (resto)
+#   4. Traduz o MID (numero da mensagem) e decodifica o payload
+#   5. Mostra um relatorio: resumo, eventos, MID 0035, VINs, saude do keep alive
+#
+#  FORMATO DE UMA LINHA DO LOG (como entendi pelo seu arquivo):
+#   07102026205643 - RECV 00 - 00630035        00000106022030040003050002062026-10-07:20:56:44
+#   |____________|   |__| |_|   |______________________________________________________|
+#     data/hora      dir  cod                      mensagem Open Protocol
+#     ddMMyyyyHHmmss
+#
+#  CABECALHO OPEN PROTOCOL (20 caracteres, posicao a partir de 0):
+#   0-3   Comprimento total da mensagem (ex: 0063)
+#   4-7   MID - tipo da mensagem (ex: 0035)
+#   8-10  Revisao da mensagem (em branco = revisao 1)
+#   11    Flag de "no ack"
+#   12-13 ID da estacao
+#   14-15 ID do fuso (spindle)
+#   16-17 Numero de sequencia
+#   18    Total de partes da mensagem
+#   19    Numero desta parte
+# =====================================================================
+
+Clear-Host
+
+# ----------------------------- CONFIGURACAO --------------------------
+# Caminho do log. Se deixar vazio, o script pergunta na hora.
+$CaminhoArquivo = "C:\Caminho\Para\Seu\Log.txt"
+
+# $true = mostra tambem as mensagens keep alive (9999) na linha do tempo.
+# $false = esconde, para aparecer so o que importa (producao, VIN, erros).
+$MostrarKeepAlive = $false
+
+# Se preencher, exporta tudo decodificado em CSV (abre no Excel). Ex: "C:\Temp\log.csv"
+$ExportarCsv = ""
+
+# Se ficar mais de X segundos sem keep alive, vira alerta (no seu log o normal e ~5s).
+$LimiteSegundosKeepAlive = 15
+
+# ------------------------- DICIONARIO DE MIDs ------------------------
+# Hashtable: chave = MID (texto com zeros a esquerda), valor = nome.
+# Lista parcial dos MIDs mais comuns do Open Protocol. Confirme no manual da sua versao.
+$NomesMID = @{
+    '0001' = 'Iniciar comunicacao'
+    '0002' = 'Comunicacao iniciada (ack)'
+    '0003' = 'Parar comunicacao'
+    '0004' = 'ERRO de comando'
+    '0005' = 'Comando aceito'
+    '0010' = 'Pedido da lista de Parameter Sets'
+    '0011' = 'Resposta da lista de Parameter Sets'
+    '0014' = 'Assinatura: Parameter Set selecionado'
+    '0015' = 'Parameter Set selecionado'
+    '0016' = 'Ack do Parameter Set selecionado'
+    '0018' = 'Selecionar Parameter Set'
+    '0019' = 'Definir tamanho do lote (batch)'
+    '0020' = 'Zerar contador do lote'
+    '0030' = 'Pedido da lista de Jobs'
+    '0031' = 'Resposta da lista de Jobs'
+    '0034' = 'Assinatura: informacao de Job'
+    '0035' = 'Informacao de Job (producao)'
+    '0036' = 'Ack da informacao de Job'
+    '0037' = 'Cancelar assinatura de Job'
+    '0038' = 'Selecionar Job'
+    '0050' = 'Envio de VIN (numero do chassi)'
+    '0051' = 'Assinatura: VIN'
+    '0052' = 'VIN recebido do controlador'
+    '0053' = 'Ack do VIN'
+    '0060' = 'Assinatura: ultimo resultado de aperto'
+    '0061' = 'Resultado do ultimo aperto'
+    '0062' = 'Ack do resultado de aperto'
+    '0063' = 'Cancelar assinatura de resultado'
+    '0070' = 'Assinatura: alarmes'
+    '0071' = 'Alarme'
+    '0072' = 'Ack do alarme'
+    '0080' = 'Pedido de data/hora'
+    '0081' = 'Resposta de data/hora'
+    '0082' = 'Acertar data/hora'
+    '9999' = 'Keep alive'
+}
+
+# Tabelas de traducao do MID 0035 (mesmas do seu decodificador manual)
+$StatusJob = @{ '0' = 'Nao completado / em andamento'; '1' = 'Concluido OK'; '2' = 'Reprovado NOK' }
+$ModoLote  = @{ '0' = 'So apertos OK contam';           '1' = 'Apertos OK e NOK contam' }
+
+# ------------------------------ FUNCOES ------------------------------
+
+# Le um payload no formato "ID do parametro (2 chars) + valor (N chars)" em sequencia.
+# $Tamanhos diz quantos caracteres tem o valor de cada ID.
+# Ex: "0106" -> ID 01, valor de 2 chars = "06".
+# Vantagem sobre regex solta: le em ORDEM e nao confunde "01" que aparece dentro de outro valor.
+function Ler-Parametros {
+    param([string]$Payload, [hashtable]$Tamanhos)
+
+    $Resultado = @{}   # onde guardo ID -> valor
+    $Pos = 0           # posicao atual de leitura no payload
+
+    while ($Pos + 2 -le $Payload.Length) {
+        $Id = $Payload.Substring($Pos, 2)                  # le o ID do parametro
+        if (-not $Tamanhos.ContainsKey($Id)) { break }     # ID desconhecido: para de ler
+        $Tam = $Tamanhos[$Id]                              # tamanho esperado do valor
+        $Pos += 2                                          # pula o ID
+        if ($Pos + $Tam -gt $Payload.Length) { break }     # payload acabou antes: para
+        $Resultado[$Id] = $Payload.Substring($Pos, $Tam)   # guarda o valor
+        $Pos += $Tam                                       # pula o valor
+    }
+    return $Resultado
+}
+
+# Recebe MID + revisao + payload e devolve um texto explicando o conteudo.
+function Decodificar-Detalhe {
+    param([string]$MID, [int]$Rev, [string]$Payload)
+
+    switch ($MID) {
+
+        '9999' { return 'Keep alive (teste de conexao)' }
+
+        # MID 0005: payload = 4 digitos com o MID que foi aceito
+        '0005' {
+            if ($Payload.Length -ge 4) { return "Aceitou o MID $($Payload.Substring(0,4))" }
+            return 'Comando aceito'
+        }
+
+        # MID 0004: payload = MID rejeitado (4) + codigo do erro (2)
+        '0004' {
+            if ($Payload.Length -ge 6) {
+                return "Rejeitou o MID $($Payload.Substring(0,4)) - codigo de erro $($Payload.Substring(4,2))"
+            }
+            return 'Erro de comando'
+        }
+
+        # MID 0050: payload = VIN (chassi). Tira espacos de preenchimento.
+        '0050' { return "VIN: $($Payload.Trim())" }
+
+        # MID 0035: informacao de Job
+        '0035' {
+            # Tamanho de cada parametro: 01=JobID 02=Status 03=Modo 04=Meta 05=Contador 06=DataHora
+            $Tam = @{ '01' = 2; '02' = 1; '03' = 1; '04' = 4; '05' = 4; '06' = 19 }
+            if ($Rev -ge 2) { $Tam['01'] = 4 }   # revisao 2: JobID passa a ter 4 digitos (confirme no manual)
+
+            $P = Ler-Parametros -Payload $Payload -Tamanhos $Tam
+
+            # Pega cada valor; se faltar, mostra "?"
+            $Job    = if ($P.ContainsKey('01')) { $P['01'] } else { '?' }
+            $St     = if ($P.ContainsKey('02')) { $P['02'] } else { '?' }
+            $Md     = if ($P.ContainsKey('03')) { $P['03'] } else { '?' }
+            $Meta   = if ($P.ContainsKey('04')) { [int]$P['04'] } else { '?' }
+            $Cont   = if ($P.ContainsKey('05')) { [int]$P['05'] } else { '?' }
+            $Hora   = if ($P.ContainsKey('06')) { $P['06'] } else { '?' }
+
+            # Traduz status e modo usando as tabelas; se codigo desconhecido, avisa
+            $StTxt = if ($StatusJob.ContainsKey($St)) { $StatusJob[$St] } else { 'nao identificado' }
+            $MdTxt = if ($ModoLote.ContainsKey($Md))  { $ModoLote[$Md] }  else { 'nao identificado' }
+
+            return "Job $Job | Status $St ($StTxt) | Modo $Md ($MdTxt) | Lote $Cont de $Meta | Hora do controlador: $Hora"
+        }
+
+        # Qualquer outro MID: mostra o payload cru
+        default {
+            if ($Payload.Trim().Length -gt 0) { return "Payload: $($Payload.Trim())" }
+            return ''
+        }
+    }
+}
+
+$CaminhoArquivo = $CaminhoArquivo.Trim().Trim('"')
+
+if ([string]::IsNullOrWhiteSpace($CaminhoArquivo) -or -not (Test-Path $CaminhoArquivo)) {
+    $CaminhoArquivo = (Read-Host "Arquivo nao encontrado. Cole o caminho do log").Trim().Trim('"')
+}
+if (-not (Test-Path $CaminhoArquivo)) {
+    Write-Host "ERRO: arquivo de log nao encontrado." -ForegroundColor Red
+    return
+}
+# Get-Content le o arquivo inteiro e devolve um array com uma linha por posicao
+$Linhas = Get-Content -Path $CaminhoArquivo
+
+# Regex da linha:  (14 digitos) - (SENT|RECV) (2 digitos) - (resto = mensagem)
+$Regex = '^(\d{14}) - (SENT|RECV) (\d{2}) - (.*)$'
+
+# Listas que vao crescer durante a leitura (List e mais rapido que array += )
+$Registros       = New-Object System.Collections.Generic.List[object]
+$LinhasInvalidas = New-Object System.Collections.Generic.List[string]
+$NumLinha = 0
+
+# --------------------------- LOOP PRINCIPAL --------------------------
+foreach ($Linha in $Linhas) {
+    $NumLinha++
+    if ([string]::IsNullOrWhiteSpace($Linha)) { continue }   # ignora linha vazia
+
+    $m = [regex]::Match($Linha, $Regex)                      # tenta casar com o formato
+    if (-not $m.Success) {
+        $LinhasInvalidas.Add("Linha ${NumLinha}: $Linha")    # guarda para avisar depois
+        continue
+    }
+
+    # Converte "07102026205643" (ddMMyyyyHHmmss) em data/hora de verdade
+    $DataHora = [datetime]::MinValue
+    [void][datetime]::TryParseExact($m.Groups[1].Value, 'ddMMyyyyHHmmss',
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::None, [ref]$DataHora)
+
+    $Direcao = $m.Groups[2].Value      # SENT (enviado ao controlador) ou RECV (recebido dele)
+    $CodLog  = $m.Groups[3].Value      # codigo de 2 digitos do seu log (ainda nao sei o significado)
+    $Msg     = $m.Groups[4].Value      # mensagem Open Protocol
+
+    if ($Msg.Length -lt 8) {           # sem espaco nem para comprimento + MID
+        $LinhasInvalidas.Add("Linha ${NumLinha}: mensagem curta demais: $Linha")
+        continue
+    }
+
+    # Completa com espacos ate 20 para o cabecalho sempre ter 20 posicoes
+    $Cab = $Msg.PadRight(20)
+
+    # Quebra o cabecalho nas posicoes fixas do protocolo
+    $Declarado = 0
+    [void][int]::TryParse($Cab.Substring(0, 4), [ref]$Declarado)   # comprimento declarado
+    $MID     = $Cab.Substring(4, 4)
+    $RevTxt  = $Cab.Substring(8, 3).Trim()
+    $Rev     = 1                                                    # revisao em branco = 1
+    if ($RevTxt -ne '') { [void][int]::TryParse($RevTxt, [ref]$Rev) }
+    $Estacao = $Cab.Substring(12, 2)
+    $Fuso    = $Cab.Substring(14, 2)
+    $Seq     = $Cab.Substring(16, 2)
+
+    # Payload = tudo depois dos 20 caracteres do cabecalho
+    $Payload = ''
+    if ($Msg.Length -gt 20) { $Payload = $Msg.Substring(20) }
+
+    # Confere se o comprimento declarado bate com o real.
+    # Mensagens so de cabecalho (20) podem ter perdido os espacos do final, entao toleramos.
+    $TamanhoOk = ($Msg.Length -eq $Declarado) -or ($Declarado -eq 20 -and $Msg.TrimEnd().Length -le 20)
+
+    $Nome = if ($NomesMID.ContainsKey($MID)) { $NomesMID[$MID] } else { 'MID nao catalogado' }
+
+    # Monta o registro decodificado e guarda na lista
+    $Registros.Add([pscustomobject][ordered]@{
+        Linha       = $NumLinha
+        DataHora    = $DataHora
+        Direcao     = $Direcao
+        CodLog      = $CodLog
+        MID         = $MID
+        NomeMID     = $Nome
+        Revisao     = $Rev
+        Estacao     = $Estacao
+        Fuso        = $Fuso
+        Sequencia   = $Seq
+        Comprimento = $Declarado
+        TamanhoOk   = $TamanhoOk
+        Detalhe     = (Decodificar-Detalhe -MID $MID -Rev $Rev -Payload $Payload)
+        Bruto       = $Msg.TrimEnd()
+    })
+}
+
+if ($Registros.Count -eq 0) {
+    Write-Host "Nenhuma linha valida encontrada. Confira o formato do arquivo." -ForegroundColor Red
+    return
+}
+
+# ------------------------ ANALISE DO KEEP ALIVE ----------------------
+# Logica: cada SENT 9999 deveria ser seguido de um RECV 9999.
+$Pendente = $null      # ultimo SENT esperando resposta
+$Latencias = @()       # tempo entre SENT e RECV (em segundos)
+$SemResposta = 0       # SENT que nunca teve RECV
+$RespostaSolta = 0     # RECV sem SENT correspondente
+$UltimoKA = $null      # hora do ultimo SENT de keep alive
+$Intervalos = @()      # tempo entre um keep alive e o proximo
+$Alertas = @()         # lista de problemas encontrados
+
+foreach ($r in $Registros) {
+    if ($r.MID -ne '9999') { continue }
+
+    if ($r.Direcao -eq 'SENT') {
+        if ($null -ne $Pendente) { $SemResposta++ }   # o anterior ficou sem resposta
+        $Pendente = $r
+        if ($null -ne $UltimoKA) {
+            $Gap = ($r.DataHora - $UltimoKA).TotalSeconds
+            $Intervalos += $Gap
+            if ($Gap -gt $LimiteSegundosKeepAlive) {
+                $Alertas += "Buraco de {0:N0}s sem keep alive antes de {1:HH:mm:ss} (linha {2})" -f $Gap, $r.DataHora, $r.Linha
+            }
+        }
+        $UltimoKA = $r.DataHora
+    }
+    else {   # RECV
+        if ($null -ne $Pendente) {
+            $Latencias += ($r.DataHora - $Pendente.DataHora).TotalSeconds
+            $Pendente = $null
+        } else { $RespostaSolta++ }
+    }
+}
+
+# --------------------------- RELATORIO -------------------------------
+$Primeiro = $Registros[0].DataHora
+$Ultimo   = $Registros[$Registros.Count - 1].DataHora
+
+Write-Host "================ ANALISE DO LOG OPEN PROTOCOL ================" -ForegroundColor Cyan
+Write-Host "Arquivo ........: $CaminhoArquivo"
+Write-Host "Linhas no arquivo: $($Linhas.Count)   |   decodificadas: $($Registros.Count)   |   invalidas: $($LinhasInvalidas.Count)"
+Write-Host ("Periodo ........: {0:dd/MM/yyyy HH:mm:ss}  ate  {1:dd/MM/yyyy HH:mm:ss}  ({2:N1} min)" -f $Primeiro, $Ultimo, ($Ultimo - $Primeiro).TotalMinutes)
+Write-Host ("Enviadas (SENT) : {0}   |   Recebidas (RECV): {1}" -f
+    @($Registros | Where-Object { $_.Direcao -eq 'SENT' }).Count,
+    @($Registros | Where-Object { $_.Direcao -eq 'RECV' }).Count)
+
+# Contagem por MID: agrupa, ordena do mais frequente para o menos
+Write-Host ""
+Write-Host "--- MENSAGENS POR MID ---" -ForegroundColor Cyan
+$Registros | Group-Object MID | Sort-Object Count -Descending | ForEach-Object {
+    $n = $NomesMID[$_.Name]; if (-not $n) { $n = 'MID nao catalogado' }
+    Write-Host ("  MID {0} - {1,-40} : {2}" -f $_.Name, $n, $_.Count)
+}
+
+# Linha do tempo de eventos (tira keep alive, a menos que voce ligue)
+Write-Host ""
+Write-Host "--- LINHA DO TEMPO ---" -ForegroundColor Cyan
+$Eventos = $Registros
+if (-not $MostrarKeepAlive) { $Eventos = $Registros | Where-Object { $_.MID -ne '9999' } }
+if (@($Eventos).Count -eq 0) {
+    Write-Host "  Sem eventos alem de keep alive neste periodo." -ForegroundColor Gray
+} else {
+    $Eventos | Format-Table -AutoSize -Wrap `
+        @{N='Hora'; E={ $_.DataHora.ToString('dd/MM HH:mm:ss') }},
+        Direcao, CodLog, MID, NomeMID, Detalhe
+}
+
+# Producao (MID 0035)
+$Prod = @($Registros | Where-Object { $_.MID -eq '0035' })
+Write-Host "--- PRODUCAO (MID 0035) ---" -ForegroundColor Cyan
+if ($Prod.Count -eq 0) {
+    Write-Host "  Nenhum MID 0035: conectada, mas sem apertos/troca de Job registrados." -ForegroundColor Gray
+} else {
+    foreach ($p in $Prod) {
+        # NOK (status 2) em vermelho, OK em verde, o resto amarelo
+        $cor = 'Yellow'
+        if ($p.Detalhe -match 'Status 2') { $cor = 'Red' } elseif ($p.Detalhe -match 'Status 1') { $cor = 'Green' }
+        Write-Host ("  {0:HH:mm:ss} -> {1}" -f $p.DataHora, $p.Detalhe) -ForegroundColor $cor
+    }
+}
+
+# VINs enviados e se o controlador aceitou (o proximo registro depois do SENT 0050 deve ser RECV 0005/0004)
+Write-Host ""
+Write-Host "--- VINs ENVIADOS (MID 0050) ---" -ForegroundColor Cyan
+$ListaReg = $Registros.ToArray()
+$QtdVin = 0
+for ($i = 0; $i -lt $ListaReg.Count; $i++) {
+    $r = $ListaReg[$i]
+    if ($r.MID -eq '0050' -and $r.Direcao -eq 'SENT') {
+        $QtdVin++
+        $Resp = 'SEM RESPOSTA'
+        if ($i + 1 -lt $ListaReg.Count) {
+            $prox = $ListaReg[$i + 1]
+            if     ($prox.MID -eq '0005') { $Resp = 'aceito (MID 0005)' }
+            elseif ($prox.MID -eq '0004') { $Resp = "REJEITADO (MID 0004) - $($prox.Detalhe)"; $Alertas += "VIN rejeitado na linha $($r.Linha)" }
+        }
+        Write-Host ("  {0:HH:mm:ss}  {1}  ->  {2}" -f $r.DataHora, $r.Detalhe, $Resp)
+    }
+}
+if ($QtdVin -eq 0) { Write-Host "  Nenhum VIN enviado." -ForegroundColor Gray }
+
+# Saude da conexao
+Write-Host ""
+Write-Host "--- SAUDE DA CONEXAO (KEEP ALIVE) ---" -ForegroundColor Cyan
+if ($Intervalos.Count -gt 0) {
+    $s = $Intervalos | Measure-Object -Average -Minimum -Maximum
+    Write-Host ("  Intervalo entre keep alives: medio {0:N1}s | min {1:N0}s | max {2:N0}s" -f $s.Average, $s.Minimum, $s.Maximum)
+}
+if ($Latencias.Count -gt 0) {
+    $l = $Latencias | Measure-Object -Average -Maximum
+    Write-Host ("  Tempo de resposta do controlador: medio {0:N1}s | max {1:N0}s (o log so tem precisao de 1s)" -f $l.Average, $l.Maximum)
+}
+Write-Host "  SENT sem resposta: $SemResposta   |   RECV sem SENT: $RespostaSolta"
+if ($SemResposta -gt 0) { $Alertas += "$SemResposta keep alive(s) enviado(s) sem resposta" }
+
+# Mensagens com comprimento errado
+$Ruins = @($Registros | Where-Object { -not $_.TamanhoOk })
+if ($Ruins.Count -gt 0) { $Alertas += "$($Ruins.Count) mensagem(ns) com comprimento diferente do declarado no cabecalho" }
+
+# Alertas finais
+Write-Host ""
+Write-Host "--- ALERTAS ---" -ForegroundColor Cyan
+if ($Alertas.Count -eq 0 -and $LinhasInvalidas.Count -eq 0) {
+    Write-Host "  Nenhum problema encontrado." -ForegroundColor Green
+} else {
+    $Alertas | ForEach-Object { Write-Host "  [!] $_" -ForegroundColor Yellow }
+    $LinhasInvalidas | Select-Object -First 10 | ForEach-Object { Write-Host "  [?] $_" -ForegroundColor Yellow }
+}
+
+# Exporta CSV, se pedido (; como separador para abrir direto no Excel BR)
+if ($ExportarCsv -ne '') {
+    $Registros | Export-Csv -Path $ExportarCsv -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Write-Host ""
+    Write-Host "CSV exportado em: $ExportarCsv" -ForegroundColor Green
+}
+Write-Host "==============================================================" -ForegroundColor Cyan
