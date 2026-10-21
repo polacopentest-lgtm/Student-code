@@ -243,5 +243,89 @@ try {
 catch {
     Write-Host "❌ Ocorreu um erro inesperado ao interpretar os dados." -ForegroundColor Red
 }
+k
+k
+k
+k
+k
+k
+k
+k
+k
 
+Ontem você perguntou sobre os MIDs, então, mesmo as PowerFocus 4000, elas falam "Open Protocol.
+ 
+Como eu sei e como identificar estes parâmetros ? Se tiver paciência vai mais uma explicação.
+ 
+O que é MID?A apertadeira (PowerFocus) e o GALC conversam numa "língua" chamada de Open Protocol, acho que nesta altura você já sacou isto certo ?
+ 
+A é importante lembrar, todo o Log do PortConvertor esta em HexaDecimal, lembra la no prézinho quando você estudou Redes, que o professor ensinava IPV6, pois é, olha ele ai. 
+ 
+Cada mensagem trocada tem um código de 4 dígitos dizendo do que ela trata. Esse código é o MID. 
+ 
+Pensa numa ligação de telefone:
+0001 / 0002: "Alô, quero conversar" / "Pode falar, tô aqui"
+9999: "Ainda tá aí?" / "Tô". Isso fica rolando a cada 10 segundos.
+0061: a apertadeira avisa: "apertei, olha o resultado"
+0062: o GALC responde: "recebi"
+0042 / 0043: o GALC manda "bloqueia a ferramenta" / "libera a ferramenta"
+0005: a apertadeira responde "ok, feito"
+0035: a apertadeira manda uma informação de Job. É essa que aparece logo antes dos travamentos.
+ 
+Como achar o MID no log? O log mostra tudo em código, tipo [30][30][32][30]. Cada [3x] é um número: [30] = 0, [31] = 1, [32] = 2 ... [39] = 9.
+ 
+Toda mensagem começa com [2].  Logo depois vêm 8 números:
+ 
+ 
+Plain Text
+[2] [30][32][33][31] [30][30][36][31]
+       0  2  3  1      0  0  6  1
+       tamanho          MID 0061
+Os 4 primeiros são o tamanho da mensagem, os 4 seguintes são o MID, Justino, aquele 0024 e aquele 0063 que você anotou ontem são tamanhos, não MIDs. 
+ 
+Por exemplo, 0063 0035 é uma mensagem de 63 caracteres com MID 0035
+ 
+ 
+Ah, e:
+Se a linha começa com [7][9][7][9], a mensagem veio do lado do GALC (TCP).
+Se começa direto com [2], veio da apertadeira (COM1).
+Exemplo de hoje no SRS04 (06:37)
+ 
+Dentro do MID 0061 dá até para ler o carro e o aperto. 
+ 
+Convertendo os bytes:
+Controlador: SRS 4 UNIT SRS
+VIN: 93HGN5871VK300592
+Torque aplicado: 11,37 Nm (limite de 10 a 14,7)
+Ângulo: 31°
+Resultado: OK
+A conversa completa ficou assim:
+ 
+ 
+Plain Text
+Apertadeira: "Apertei o carro 93HGN5871VK300592, deu OK"   (0061)
+GALC:        "Recebi"                                       (0062)
+GALC:        "Bloqueia a ferramenta"                        (0042)
+Apertadeira: "Feito"                                        (0005)
+GALC:        "Libera de novo"                               (0043)
+Apertadeira: "Feito"                                        (0005)
+... segundo parafuso, mesma coisa ...
+Depois, só "tá aí?" / "tô" a cada 10 s                      (9999)
+
+ 
+Isso é o funcionamento normal.
+ 
+E nos travamentos, o que acontece?
+ 
+Nos casos que analisei, a sequência sempre se repete:
+A apertadeira manda o 0035 quatro vezes seguidas.
+O GALC manda um 0042 (bloqueia) e a apertadeira não responde o "feito".
+A conversa para dos dois lados por uns 4 minutos.
+Alguém aperta ENTER, aparece um erro no PortConvertor e o GALC reabre a ligação (0001 → 0002).
+Volta tudo ao normal.
+Ainda não dá para dizer que o 0035 é a causa. Por enquanto ele é o "sinal de alerta" que aparece antes. 
+ 
+Ai tem o Video que o Gabriel fez, onde mostra o Clique do Mouse no console, este cara esta com o inicio do PortConvertor 5h30, que sugere que algo ou alguém clicou no console sem querer.
+ 
+Mais ainda é especulação.
 
