@@ -211,3 +211,537 @@ Conclusão:
 Forte indício de interrupção de comunicação PF -> GALC antes da geração do SYSUT083.
 
 Que é exatamente o trabalho que você está fazendo manualmente hoje.
+
+
+
+Perfeito. Abaixo está um pacote de contexto completo para você colar na sua IA de projeto pessoal. Tentei separar o que é fato comprovado, o que é hipótese e o que já foi desenvolvido no script.
+
+PROJETO: ANALISADOR DE LOG DO PORTCONVERTOR (GALC ↔ POWERFOCUS)
+Objetivo
+
+Criar uma ferramenta PowerShell capaz de:
+
+Decodificar logs do PortConvertor.
+Reconstruir a comunicação Open Protocol.
+Detectar falhas de comunicação.
+Detectar exceções Java.
+Correlacionar exceções com interrupções de comunicação.
+Gerar automaticamente relatórios técnicos.
+Detectar arquivos duplicados.
+Produzir evidências para investigação da causa raiz.
+Ambiente
+Arquitetura observada
+PowerFocus 4000
+        │
+        │ Serial (COM1)
+        ▼
+PortConvertor
+        │
+        │ TCP/IP porta 10009
+        ▼
+GALC
+        │
+        ▼
+Honda MES / Aplicação
+
+Comportamento observado em campo
+
+Foi constatado diversas vezes que:
+
+PortConvertor aparentemente trava
+↓
+GALC deixa de receber mensagens
+↓
+SYSUT083 aparece
+↓
+Pressiona ENTER no PortConvertor
+↓
+Comunicação volta imediatamente
+
+
+Importante:
+
+Não é necessário reiniciar o PortConvertor.
+
+Não é necessário reiniciar o GALC.
+
+Apenas pressionar ENTER.
+
+
+Isso sugere:
+
+Buffer preso
+Sessão travada
+Timeout
+Controle de fluxo
+Mensagem incompleta
+Problema de serialização
+Freeze parcial do conversor
+
+Erro recorrente
+
+Sempre aparece:
+
+SYSUT083,E
+Exception occurred in transmitter.
+java.lang.Exception
+
+at com.honda.global.galc.system.tools.Transmitter.run(Transmitter.java:200)
+
+Principal hipótese atual
+
+A exceção:
+
+Transmitter.java:200
+
+
+é consequência da perda de comunicação.
+
+Não parece ser a causa raiz.
+
+Fluxo provável:
+
+Perda de mensagens
+↓
+GALC fica aguardando
+↓
+Timeout interno
+↓
+java.lang.Exception
+↓
+SYSUT083
+
+Open Protocol identificado
+
+O log contém mensagens Atlas Copco Open Protocol.
+
+Foram confirmados os seguintes MID:
+
+0001
+0002
+0004
+0005
+0034
+0035
+0036
+0042
+0043
+0050
+0060
+0061
+0062
+9999
+
+MID mais importante
+MID 0035
+Job Information
+
+
+Contém:
+
+Job ID
+Job Status
+Batch
+Timestamp
+Step
+Counter
+
+
+Observação:
+
+Nos logs problemáticos aparecem rajadas de MID 0035.
+
+Hipótese:
+
+PF envia Job Info
+GALC não processa
+PF reenvia
+PF reenvia novamente
+
+MID 0036
+Ack do Job Info
+
+
+Grande suspeita:
+
+PF envia 0035
+GALC deveria responder 0036
+Não responde
+PF reenvia
+
+
+Necessário validar isso automaticamente.
+
+MID 0061
+Resultado de aperto
+
+
+Contém:
+
+VIN
+Job
+PSet
+Torque
+Ângulo
+Status
+ID Aperto
+
+
+Esses registros são usados para:
+
+Jobs incompletos
+VINs
+Torque NOK
+Análise de produção
+
+Estrutura do log
+Mensagem válida
+
+Formato:
+
+Thread-9,SYSUT082,I,1,Output of received data.,
+[2][30][30][36][31]...
+2026/08/11 ...
+
+Identificação do lado
+GALC
+
+Prefixo:
+
+[7][9][7][9][2]
+
+
+Interpretação:
+
+GALC -> PortConvertor
+
+PowerFocus
+
+Prefixo:
+
+[2]
+
+
+Interpretação:
+
+PowerFocus -> GALC
+
+Mensagem Open Protocol
+
+Depois do STX:
+
+006300350010000...
+
+
+Estrutura:
+
+0063 = tamanho
+0035 = MID
+001 = revisão
+...
+
+
+Primeiros 20 caracteres:
+
+Header
+
+
+Restante:
+
+Payload
+
+Arquivos já analisados
+11/08/2026
+
+Arquivo:
+
+20260811 - Copia.log
+
+
+Quantidade:
+
+1 erro
+
+
+Erro:
+
+21:47:18.038
+
+
+Última comunicação:
+
+21:47:09.100
+
+
+Retorno:
+
+21:47:23.428
+
+
+Linha:
+
+84446
+
+08/09/2026
+
+Arquivo:
+
+20260908 - Copia.txt
+
+
+Quantidade:
+
+0 erros
+
+
+Nenhum:
+
+SYSUT083
+
+16/09/2026
+
+Arquivo:
+
+20260916.log
+
+
+Quantidade:
+
+4 erros
+
+
+Horários:
+
+06:32:47.302
+06:59:05.299
+19:47:00.136
+21:08:21.488
+
+23/09/2026
+
+Arquivo:
+
+20260923.log
+
+
+Quantidade:
+
+2 erros
+
+
+Horários:
+
+10:27:29.424
+10:49:21.353
+
+24/09/2026
+
+Arquivos:
+
+2110errosrs04.txt
+20260924.log
+lteste.txt
+
+Duplicidade
+
+Confirmado:
+
+20260924.log
+=
+2110errosrs04.txt
+
+
+Hash idêntico.
+
+Mesmo conteúdo.
+
+Deve contar apenas uma vez.
+
+Erros
+22:12:03.212
+22:12:18.860
+
+
+Última comunicação:
+
+22:08:13.285
+
+
+Retorno:
+
+22:12:41.261
+
+07/10/2026
+
+Arquivo:
+
+20261007 - Copia.log
+
+
+Quantidade:
+
+1 erro
+
+
+Erro:
+
+21:02:02.835
+
+
+Última comunicação:
+
+20:56:59.172
+
+
+Retorno:
+
+21:02:05.444
+
+14/10/2026
+
+Arquivos:
+
+20261014.log
+20261014 - Copia.log
+
+Duplicidade parcial
+20261014 - Copia.log
+
+
+contém apenas parte do conteúdo.
+
+Arquivo completo:
+
+20261014.log
+
+Erros
+08:06:09.392
+
+16:29:14.389
+
+16:30:55.905
+
+Total de erros únicos
+
+Contabilizando somente ocorrências válidas:
+
+11/08 → 1
+16/09 → 4
+23/09 → 2
+24/09 → 2
+07/10 → 1
+14/10 → 3
+
+
+Total:
+
+13 erros únicos
+
+Funcionalidades já existentes no script
+
+O script já faz:
+
+✅ Decodificação Open Protocol
+
+✅ Separação GALC / PF
+
+✅ Parsing de:
+
+0035
+0061
+9999
+
+
+✅ Análise de Job
+
+✅ Detecção de exceções Java
+
+✅ Análise de rajadas MID0035
+
+✅ Timeline das falhas
+
+✅ Jobs incompletos
+
+✅ Exportação CSV
+
+✅ Checagem QuickEdit
+
+✅ Detecção de silêncios
+
+✅ Achados automáticos
+
+Melhorias identificadas
+
+Adicionar:
+
+1. Contador SYSUT083
+Quantidade total
+Horários
+Linhas
+
+2. Resumo automático
+
+Formato:
+
+ERRO
+ULTIMA COMUNICACAO
+RETORNO
+
+3. Detector de travamento
+
+Regra:
+
+Silêncio > 60s
++
+SYSUT083
+=
+Possível travamento
+
+4. Relatório TXT
+
+Saída automática:
+
+Resumo técnico
+
+5. Exportação CSV de incidentes
+
+Campos:
+
+Data
+Erro
+Última comunicação
+Retorno
+Gap
+MID anterior
+
+6. Detector de arquivos duplicados
+
+Usar:
+
+Get-FileHash -Algorithm SHA256
+
+
+para bloquear dupla contagem.
+
+Principal pergunta de investigação
+
+O objetivo do projeto agora é responder:
+
+Quem para primeiro?
+
+GALC?
+PortConvertor?
+PowerFocus?
+
+
+Porque atualmente só sabemos:
+
+GALC registra SYSUT083.
+
+
+Mas ainda não foi comprovado:
+
+Quem provocou a perda de comunicação.
+
+
+Essa deve ser a próxima evolução do analisador.
