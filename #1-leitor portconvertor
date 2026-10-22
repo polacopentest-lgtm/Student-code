@@ -187,3 +187,886 @@ if ($ChecarQuickEdit) {
 Write-Host ""
 Write-Host ("Tempo de analise: {0:N1}s" -f ((Get-Date) - $Inicio).TotalSeconds) -ForegroundColor DarkGray
 Write-Host "==============================================================" -ForegroundColor Cyan
+22
+22
+22
+22
+22
+22
+22
+\xEF\xBB\xBF<#
+=====================================================================
+ ANALISADOR DO LOG DO PORTCONVERTOR (GALC <-> PowerFocus 4000)
+=====================================================================
+ USO:
+   .\Analisa-PortConvertor.ps1 -Caminho "C:\logs\20260811.log"
+   .\Analisa-PortConvertor.ps1 -Caminho "C:\logs\20260811.log" -CsvSaida "C:\Temp\decodificado.csv"
+   .\Analisa-PortConvertor.ps1 -ChecarQuickEdit      (confere o QuickEdit desta maquina)
+   .\Analisa-PortConvertor.ps1 -Caminho "C:\logs\20260924.log" -RelatorioTxt "C:\Temp\rel.txt" -IncidentesCsv "C:\Temp\inc.csv"
+   Varios arquivos de uma vez (com deteccao de duplicados): use o Analisa-PastaPortConvertor.ps1
+
+ COMO O LOG E ESCRITO (o que o script precisa entender):
+   Cada mensagem aparece como uma linha assim:
+     Thread-9,SYSUT082,I,1,Output of received data.,[2][30][30]...[0][3],2026/08/11 21:46:55:662,Transmitter,dumpBytes,ITIPRD0504,
+
+   1) Os bytes vem em HEXADECIMAL entre colchetes. [30]=0 [31]=1 ... [39]=9, [20]=espaco.
+      Ex.: [30][30][36][31] = "0061".
+   2) [2] no comeco = STX (inicio de mensagem). [0][3] no fim = NUL + ETX (fim).
+   3) Se antes do [2] vier [7][9][7][9], a mensagem veio do GALC (TCP, porta 10009).
+      Se comecar direto em [2], veio da apertadeira (COM1).
+   4) Depois do [2], o texto Open Protocol:
+        4 caracteres = TAMANHO total      (ex.: 0063)
+        4 caracteres = MID                (ex.: 0035)  <- tipo da mensagem
+        3 = revisao | 1 = flag | 2 = estacao | 2 = fuso | 2 = sequencia | 1 = partes | 1 = parte atual
+        (esses 20 primeiros caracteres sao o CABECALHO; o resto e o PAYLOAD)
+   5) O log e escrito por varias threads ao mesmo tempo, entao as linhas "Receive from..."
+      e os bytes crus ficam bagunçados. A unica linha confiavel e a que comeca com "Thread-N,...,data".
+      O script usa so ela e ordena tudo pela data/hora.
+=====================================================================
+#>
+
+param(
+    [string]$Caminho = "",          # caminho do log do PortConvertor
+    [int]$GapSegundos = 15,         # silencio acima disso (por lado) vira alerta. Keep alive normal = 10 s
+    [int]$TimeoutRespostaSeg = 5,   # tempo maximo para considerar que uma resposta "nao veio"
+    [int]$JanelaAntesSeg = 60,      # na autopsia da excecao: quantos segundos antes mostrar
+    [int]$JanelaDepoisSeg = 30,     # ... e quantos depois
+    [string]$CsvSaida = "",         # se preenchido, exporta todas as mensagens decodificadas
+    [switch]$ChecarQuickEdit,       # confere a configuracao QuickEdit do console desta maquina
+    [int]$LimiteTravamentoSeg = 60, # silencio maior que isso antes do erro = POSSIVEL TRAVAMENTO
+    [int]$JanelaRetornoSeg = 300,   # ate quantos segundos depois do erro procurar o 0001 de retorno
+    [string]$IncidentesCsv = "",    # exporta 1 linha por SYSUT083 (data, ultima comunicacao, silencio, retorno...)
+    [string]$RelatorioTxt = ""      # grava o "resumo para relatorio" em arquivo TXT
+)
+
+$Inicio = Get-Date
+
+# ---------------------------------------------------------------------
+# 0. FUNCOES AUXILIARES DE FORMATACAO
+# ---------------------------------------------------------------------
+# Numero com virgula decimal (padrao brasileiro), independente da cultura do Windows
+function Fmt {
+    param([double]$n, [int]$casas = 2)
+    return ($n.ToString("F$casas", [Globalization.CultureInfo]::InvariantCulture)).Replace('.', ',')
+}
+
+# Duracao legivel: 20,5s / 2min05s / 3h01min
+function FmtDur {
+    param([double]$seg)
+    if ($seg -ge 3600) { return ('{0}h{1:00}min' -f [int][math]::Floor($seg / 3600), [int][math]::Floor(($seg % 3600) / 60)) }
+    if ($seg -ge 60)   { return ('{0}min{1:00}s' -f [int][math]::Floor($seg / 60), [int][math]::Floor($seg % 60)) }
+    return ((Fmt $seg 1) + 's')
+}
+
+function Hora { param([datetime]$d) return $d.ToString('HH:mm:ss.fff') }
+
+function Titulo {
+    param([string]$Texto)
+    Write-Host ""
+    Write-Host "--- $Texto ---" -ForegroundColor Cyan
+}
+
+# ---------------------------------------------------------------------
+# 1. DICIONARIOS (nomes de MID e tabelas de campos)
+# ---------------------------------------------------------------------
+$NomesMID = @{
+    '0001' = 'Iniciar sessao (GALC -> PF)'
+    '0002' = 'Sessao iniciada (PF -> GALC)'
+    '0004' = 'ERRO de comando'
+    '0005' = 'Comando aceito'
+    '0034' = 'Assinar Job info'
+    '0035' = 'Job info (PF -> GALC)'
+    '0036' = 'Ack do Job info (GALC -> PF)'
+    '0042' = 'BLOQUEAR ferramenta'
+    '0043' = 'LIBERAR ferramenta'
+    '0050' = 'Enviar VIN'
+    '0060' = 'Assinar resultado de aperto'
+    '0061' = 'Resultado de aperto'
+    '0062' = 'Ack do resultado de aperto'
+    '9999' = 'Keep alive'
+}
+
+# Tamanho (em caracteres) do VALOR de cada parametro. No payload cada parametro vem como:
+#   [ID com 2 digitos][valor com N caracteres]   ex.: "05" + "04" = parametro 05 (Job) = 04
+$Tam0002 = @{ '01' = 4; '02' = 2; '03' = 25 }
+$Tam0035 = @{ '01' = 2; '02' = 1; '03' = 1; '04' = 4; '05' = 4; '06' = 19 }
+$Tam0061 = @{
+    '01' = 4;  '02' = 2;  '03' = 25; '04' = 25; '05' = 2;  '06' = 3;  '07' = 4;  '08' = 4
+    '09' = 1;  '10' = 1;  '11' = 1;  '12' = 6;  '13' = 6;  '14' = 6;  '15' = 6
+    '16' = 5;  '17' = 5;  '18' = 5;  '19' = 5;  '20' = 19; '21' = 19; '22' = 1; '23' = 10
+}
+# 01 celula | 02 canal | 03 controlador | 04 VIN | 05 Job | 06 PSet | 07 meta do lote | 08 contador do lote
+# 09 status do aperto (0=NOK 1=OK) | 10 status torque | 11 status angulo (0=baixo 1=OK 2=alto)
+# 12 torque min | 13 torque max | 14 torque alvo | 15 torque final (2 casas decimais: 001141 = 11,41 Nm)
+# 16 angulo min | 17 angulo max | 18 angulo alvo | 19 angulo final | 20 data/hora do aperto
+# 21 data/hora da ultima mudanca de PSet | 22 status do lote | 23 ID do aperto
+
+$StatusJob = @{ '0' = 'nao completado'; '1' = 'concluido OK'; '2' = 'reprovado/NOK' }
+$StatusLimite = @{ '0' = 'baixo'; '1' = 'OK'; '2' = 'alto' }
+
+# Le "ID+valor" em sequencia usando a tabela de tamanhos. Devolve ID -> valor.
+function Ler-Parametros {
+    param([string]$Payload, [hashtable]$Tamanhos)
+    $Resultado = @{}
+    $Pos = 0
+    while ($Pos + 2 -le $Payload.Length) {
+        $Id = $Payload.Substring($Pos, 2)
+        if (-not $Tamanhos.ContainsKey($Id)) { break }
+        $Tam = $Tamanhos[$Id]
+        $Pos += 2
+        if ($Pos + $Tam -gt $Payload.Length) { break }
+        $Resultado[$Id] = $Payload.Substring($Pos, $Tam)
+        $Pos += $Tam
+    }
+    return $Resultado
+}
+
+# Pega um valor do hashtable ou '?' se nao existir
+function V { param($D, [string]$k) if ($D.ContainsKey($k)) { return $D[$k] } return '?' }
+
+# ---------------------------------------------------------------------
+# 2. DECODIFICACAO DOS BYTES [30][31]... EM TEXTO
+# ---------------------------------------------------------------------
+# Cache: o mesmo texto de bytes (ex.: keep alive) aparece milhares de vezes; converte so uma vez.
+$CacheBytes = @{}
+
+# Devolve @( Lado , Texto , MolduraOk )
+function Converter-Bytes {
+    param([string]$Bytes)
+    if ($CacheBytes.ContainsKey($Bytes)) { return $CacheBytes[$Bytes] }
+
+    $Lado = 'PF'
+    $Resto = $Bytes
+    if ($Resto.StartsWith('[7][9][7][9]')) {      # prefixo do lado do GALC (TCP)
+        $Lado = 'GALC'
+        $Resto = $Resto.Substring(12)
+    }
+    # "[2][30][30]...[0][3]" -> ["2","30","30",...,"0","3"]
+    $Partes = $Resto.Split([char[]]@('[', ']'), [StringSplitOptions]::RemoveEmptyEntries)
+    $MolduraOk = ($Partes.Count -ge 3 -and $Partes[0] -eq '2' -and $Partes[$Partes.Count - 2] -eq '0' -and $Partes[$Partes.Count - 1] -eq '3')
+
+    $sb = New-Object System.Text.StringBuilder
+    # pula o STX ([2]) do inicio e o NUL+ETX ([0][3]) do fim
+    for ($i = 1; $i -lt $Partes.Count - 2; $i++) {
+        [void]$sb.Append([char][Convert]::ToInt32($Partes[$i], 16))
+    }
+    $Resultado = @($Lado, $sb.ToString(), $MolduraOk)
+    $CacheBytes[$Bytes] = $Resultado
+    return $Resultado
+}
+
+# Explica em portugues o conteudo de cada MID
+function Decodificar-Detalhe {
+    param([string]$MID, [string]$Payload, $Dados)
+
+    switch ($MID) {
+        '9999' { return 'Keep alive' }
+        '0001' { return 'GALC pede para abrir a sessao' }
+        '0002' {
+            $P = Ler-Parametros -Payload $Payload -Tamanhos $Tam0002
+            return ("Sessao aberta | Controlador: {0} | Celula {1} | Canal {2}" -f (V $P '03').Trim(), (V $P '01'), (V $P '02'))
+        }
+        '0004' {
+            if ($Payload.Length -ge 6) { return "REJEITOU o MID $($Payload.Substring(0,4)) - codigo de erro $($Payload.Substring(4,2))" }
+            return 'Erro de comando'
+        }
+        '0005' {
+            if ($Payload.Length -ge 4) { return "Aceitou o MID $($Payload.Substring(0,4))" }
+            return 'Comando aceito'
+        }
+        '0036' { return 'GALC confirma o Job info' }
+        '0042' { return 'GALC manda BLOQUEAR a ferramenta' }
+        '0043' { return 'GALC manda LIBERAR a ferramenta' }
+        '0060' { return 'GALC assina os resultados de aperto (pede os 0061)' }
+        '0062' { return 'GALC confirma o recebimento do resultado' }
+        '0035' {
+            $P = Ler-Parametros -Payload $Payload -Tamanhos $Tam0035
+            $St = V $P '02'
+            $StTxt = if ($StatusJob.ContainsKey($St)) { $StatusJob[$St] } else { 'desconhecido' }
+            return ("Job {0} | Status {1} ({2}) | Lote {3} de {4} | Hora do controlador {5}" -f (V $P '01'), $St, $StTxt, ([int](V $P '05')), ([int](V $P '04')), (V $P '06'))
+        }
+        '0061' {
+            $D = $Dados
+            $Ap = switch (V $D '09') { '1' { 'OK' } '0' { 'NOK' } default { '?' } }
+            $Tq = [double](V $D '15') / 100
+            $TqMin = [double](V $D '12') / 100
+            $TqMax = [double](V $D '13') / 100
+            $StT = $StatusLimite[(V $D '10')]
+            $StA = $StatusLimite[(V $D '11')]
+            return ("VIN {0} | Job {1} PSet {2} | Aperto {3} | Torque {4} Nm (limites {5}-{6}, {7}) | Angulo {8} graus ({9}) | Lote {10}/{11} | ID {12}" -f `
+                (V $D '04').Trim(), (V $D '05'), (V $D '06'), $Ap, (Fmt $Tq 2), (Fmt $TqMin 2), (Fmt $TqMax 2), $StT, ([int](V $D '19')), $StA, ([int](V $D '08')), ([int](V $D '07')), (V $D '23'))
+        }
+        default {
+            if ($Payload.Trim().Length -gt 0) { return "Payload: $($Payload.Trim())" }
+            return ''
+        }
+    }
+}
+
+# ---------------------------------------------------------------------
+# 3. LEITURA DO ARQUIVO
+# ---------------------------------------------------------------------
+if ([string]::IsNullOrWhiteSpace($Caminho)) {
+    $Caminho = Read-Host "Cole o caminho do log do PortConvertor"
+}
+$Caminho = $Caminho.Trim().Trim('"')
+
+if ($ChecarQuickEdit -and [string]::IsNullOrWhiteSpace($Caminho)) { $Caminho = "" }
+
+if (-not [string]::IsNullOrWhiteSpace($Caminho) -and -not (Test-Path $Caminho)) {
+    Write-Host "ERRO: arquivo nao encontrado: $Caminho" -ForegroundColor Red
+    return
+}
+
+# Expressoes regulares (compiladas uma vez; a linha de mensagem e a que importa)
+$RxMsg    = [regex]'^Thread-(\d+),(\w+),(\w),(\d+),Output of received data\.,((?:\[[0-9a-fA-F]+\])+),(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}:\d{3}),'
+$RxMain   = [regex]'^main,(\w+),(\w),(\d+),([^,]*),[^,]*,(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}:\d{3}),'
+$RxExcIni = [regex]'^Thread-(\d+),(\w+),E,(\d+),(.*)$'
+$RxExcFim = [regex]'^,(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}:\d{3}),'
+$Cultura  = [Globalization.CultureInfo]::InvariantCulture
+$FmtData  = 'yyyy/MM/dd HH:mm:ss:fff'
+
+$Regs        = New-Object System.Collections.Generic.List[object]   # mensagens decodificadas
+$Eventos     = New-Object System.Collections.Generic.List[object]   # eventos de sistema (inicio, excecao...)
+$Desconhecidas = New-Object System.Collections.Generic.List[string]
+$MolduraRuim = 0
+$NumLinha    = 0
+$UltimaHora  = $null           # ultima data/hora vista (para datar eventos sem hora propria)
+$EmExcecao   = $false
+$ExcTextos   = $null
+$ExcThread   = ''
+$ExcCodigo   = ''
+$ExcLinhaIni = 0
+$global:ResumoLog = $null      # usado pelo Analisa-PastaPortConvertor.ps1
+
+Write-Host "Lendo o arquivo (pode levar alguns segundos)..." -ForegroundColor DarkGray
+
+if (-not [string]::IsNullOrWhiteSpace($Caminho)) {
+foreach ($Linha in [System.IO.File]::ReadLines($Caminho)) {
+    $NumLinha++
+
+    # --- 3.1 Linha de mensagem (a principal) ---
+    if ($Linha.StartsWith('Thread-')) {
+        $m = $RxMsg.Match($Linha)
+        if ($m.Success) {
+            $DataHora = [datetime]::ParseExact($m.Groups[6].Value, $FmtData, $Cultura)
+            $UltimaHora = $DataHora
+
+            $Conv   = Converter-Bytes -Bytes $m.Groups[5].Value
+            $Lado   = $Conv[0]
+            $Texto  = $Conv[1]
+            if (-not $Conv[2]) { $MolduraRuim++ }
+
+            if ($Texto.Length -lt 8) { $Desconhecidas.Add("Linha ${NumLinha}: mensagem curta: $Texto"); continue }
+
+            $Cab = $Texto.PadRight(20)
+            $Declarado = 0
+            [void][int]::TryParse($Cab.Substring(0, 4), [ref]$Declarado)
+            $MID = $Cab.Substring(4, 4)
+            $RevTxt = $Cab.Substring(8, 3).Trim()
+            $Rev = 1
+            if ($RevTxt -ne '') { [void][int]::TryParse($RevTxt, [ref]$Rev) }
+            $Payload = ''
+            if ($Texto.Length -gt 20) { $Payload = $Texto.Substring(20) }
+
+            $Dados = $null
+            if ($MID -eq '0061') { $Dados = Ler-Parametros -Payload $Payload -Tamanhos $Tam0061 }
+
+            $Nome = if ($NomesMID.ContainsKey($MID)) { $NomesMID[$MID] } else { 'MID nao catalogado' }
+
+            $Regs.Add([pscustomobject][ordered]@{
+                Linha    = $NumLinha
+                DataHora = $DataHora
+                Lado     = $Lado
+                Thread   = [int]$m.Groups[1].Value
+                MID      = $MID
+                Nome     = $Nome
+                Rev      = $Rev
+                Comp     = $Declarado
+                TamOk    = ($Declarado -eq $Texto.Length)
+                Detalhe  = $(if ($MID -eq '9999') { 'Keep alive' } else { Decodificar-Detalhe -MID $MID -Payload $Payload -Dados $Dados })
+                Payload  = $Payload
+                Dados    = $Dados
+            })
+            continue
+        }
+    }
+
+    # --- 3.2 Continuacao de uma excecao Java (varias linhas ate a linha que termina com a data) ---
+    if ($EmExcecao) {
+        $f = $RxExcFim.Match($Linha)
+        if ($f.Success) {
+            $DataExc = [datetime]::ParseExact($f.Groups[1].Value, $FmtData, $Cultura)
+            $UltimaHora = $DataExc
+            $Eventos.Add([pscustomobject][ordered]@{
+                Linha = $ExcLinhaIni; DataHora = $DataExc; Aprox = $false; Tipo = 'EXCECAO'; Codigo = $ExcCodigo
+                Texto = ("Thread-{0}: {1}" -f $ExcThread, ($ExcTextos -join ' | '))
+            })
+            $EmExcecao = $false
+        } else {
+            $ExcTextos.Add($Linha.Trim())
+        }
+        continue
+    }
+
+    # --- 3.3 Inicio de excecao ---
+    $e = $RxExcIni.Match($Linha)
+    if ($e.Success) {
+        $EmExcecao = $true
+        $ExcThread = $e.Groups[1].Value
+        $ExcCodigo = $e.Groups[2].Value      # codigo da mensagem do log, ex.: SYSUT083
+        $ExcLinhaIni = $NumLinha             # linha onde a excecao COMECOU
+        $ExcTextos = New-Object System.Collections.Generic.List[string]
+        $ExcTextos.Add($e.Groups[4].Value.Trim())
+        continue
+    }
+
+    # --- 3.4 Linha "main,..." (ex.: PortConvertor started) ---
+    $mm = $RxMain.Match($Linha)
+    if ($mm.Success) {
+        $DataMain = [datetime]::ParseExact($mm.Groups[5].Value, $FmtData, $Cultura)
+        $Tipo = if ($mm.Groups[4].Value -like '*PortConvertor started*') { 'INICIO_PORTCONVERTOR' } else { 'MAIN' }
+        $Eventos.Add([pscustomobject][ordered]@{
+            Linha = $NumLinha; DataHora = $DataMain; Aprox = $false; Tipo = $Tipo; Texto = $mm.Groups[4].Value
+        })
+        $UltimaHora = $DataMain
+        continue
+    }
+
+    # --- 3.5 Linhas de texto solto do GALC (sem data propria: usamos a ultima data vista) ---
+    if ($Linha.Contains('Starting GALC Application')) {
+        $Eventos.Add([pscustomobject][ordered]@{ Linha = $NumLinha; DataHora = $UltimaHora; Aprox = $true; Tipo = 'INICIO_GALC'; Texto = 'GALC iniciando' }); continue
+    }
+    if ($Linha.Contains('Complete to start Application')) {
+        $Eventos.Add([pscustomobject][ordered]@{ Linha = $NumLinha; DataHora = $UltimaHora; Aprox = $true; Tipo = 'GALC_OK'; Texto = 'GALC iniciou com sucesso' }); continue
+    }
+    if ($Linha.Contains('Fail to start GALC')) {
+        $Eventos.Add([pscustomobject][ordered]@{ Linha = $NumLinha; DataHora = $UltimaHora; Aprox = $true; Tipo = 'GALC_FALHA'; Texto = 'GALC FALHOU ao iniciar' }); continue
+    }
+
+    # --- 3.6 Ruido conhecido (ignorar) ---
+    if ($Linha.Length -eq 0 -or $Linha.StartsWith('Receive from') -or $Linha.StartsWith('---') -or $Linha.StartsWith('[') `
+        -or $Linha.StartsWith('Removed:') -or $Linha.StartsWith('Removing all') -or $Linha.StartsWith('Finished cleaning') `
+        -or $Linha.StartsWith('Failed reason') -or $Linha -eq '.') { continue }
+
+    if ($Desconhecidas.Count -lt 10) { $Desconhecidas.Add("Linha ${NumLinha}: $Linha") }
+}
+}
+
+if ($Regs.Count -eq 0 -and -not $ChecarQuickEdit) {
+    Write-Host "Nenhuma mensagem reconhecida. Confira se este e o log do PortConvertor." -ForegroundColor Red
+    return
+}
+
+if ($Regs.Count -gt 0) {
+
+# O log e escrito por threads concorrentes: ordenar pela data/hora (desempate pela linha)
+$Regs = @($Regs | Sort-Object DataHora, Linha)
+
+# ---------------------------------------------------------------------
+# 4. RESUMO
+# ---------------------------------------------------------------------
+$Primeiro = $Regs[0].DataHora
+$Ultimo   = $Regs[$Regs.Count - 1].DataHora
+Write-Host ""
+Write-Host "================ ANALISE DO LOG DO PORTCONVERTOR ================" -ForegroundColor Cyan
+Write-Host "Arquivo .........: $Caminho"
+Write-Host ("Linhas lidas ....: {0}   |   mensagens decodificadas: {1}" -f $NumLinha, $Regs.Count)
+Write-Host ("Periodo .........: {0:dd/MM/yyyy HH:mm:ss}  ate  {1:dd/MM/yyyy HH:mm:ss}  ({2})" -f $Primeiro, $Ultimo, (FmtDur ($Ultimo - $Primeiro).TotalSeconds))
+Write-Host ("Do GALC (TCP) ...: {0}   |   Da apertadeira (COM1): {1}" -f @($Regs | Where-Object { $_.Lado -eq 'GALC' }).Count, @($Regs | Where-Object { $_.Lado -eq 'PF' }).Count)
+Write-Host ("Threads vistas ..: {0}" -f ((@($Regs | Select-Object -ExpandProperty Thread -Unique | Sort-Object) | ForEach-Object { "Thread-$_" }) -join ', '))
+if ($MolduraRuim -gt 0) { Write-Host "Mensagens sem [2]...[0][3] corretos: $MolduraRuim" -ForegroundColor Yellow }
+
+Titulo "MENSAGENS POR LADO E MID"
+$Regs | Group-Object Lado, MID | Sort-Object Count -Descending | ForEach-Object {
+    $o = $_.Group[0]
+    $sentido = if ($o.Lado -eq 'GALC') { 'GALC -> PF' } else { 'PF -> GALC' }
+    Write-Host ("  {0}  MID {1}  {2,-32} : {3}" -f $sentido, $o.MID, $o.Nome, $_.Count)
+}
+
+Titulo "EVENTOS DO SISTEMA (inicio do PortConvertor, GALC, excecoes)"
+if ($Eventos.Count -eq 0) { Write-Host "  Nenhum." -ForegroundColor Gray }
+foreach ($ev in $Eventos) {
+    $aprox = if ($ev.Aprox) { ' (hora aproximada: ultima mensagem vista)' } else { '' }
+    $cor = switch ($ev.Tipo) { 'EXCECAO' { 'Red' } 'GALC_FALHA' { 'Red' } 'INICIO_PORTCONVERTOR' { 'Yellow' } default { 'Gray' } }
+    Write-Host ("  {0:dd/MM HH:mm:ss}  {1,-22} {2}{3}" -f $ev.DataHora, $ev.Tipo, $ev.Texto, $aprox) -ForegroundColor $cor
+}
+
+# Contador por codigo de mensagem de erro (SYSUT083 = "Exception occurred in transmitter")
+$ExcTodas = @($Eventos | Where-Object { $_.Tipo -eq 'EXCECAO' })
+Write-Host ""
+if ($ExcTodas.Count -eq 0) {
+    Write-Host "  Erros SYSUT083 ......: 0" -ForegroundColor Green
+} else {
+    foreach ($g in ($ExcTodas | Group-Object Codigo | Sort-Object Name)) {
+        Write-Host ("  {0} ......: {1} ocorrencia(s) | linha(s) {2}" -f $g.Name, $g.Count, (($g.Group | ForEach-Object { $_.Linha }) -join ', ')) -ForegroundColor Red
+    }
+}
+
+# ---------------------------------------------------------------------
+# 5. SILENCIOS (buracos de comunicacao por lado)
+# ---------------------------------------------------------------------
+# Em operacao normal os dois lados falam a cada ~10 s (keep alive). Silencio longo = problema.
+$Silencios = New-Object System.Collections.Generic.List[object]
+foreach ($lado in 'PF', 'GALC') {
+    $ant = $null
+    foreach ($r in $Regs) {
+        if ($r.Lado -ne $lado) { continue }
+        if ($null -ne $ant) {
+            $g = ($r.DataHora - $ant.DataHora).TotalSeconds
+            if ($g -gt $GapSegundos) {
+                $Silencios.Add([pscustomobject][ordered]@{ Lado = $lado; De = $ant.DataHora; Ate = $r.DataHora; Seg = $g; Ultima = "$($ant.MID)"; Primeira = "$($r.MID)" })
+            }
+        }
+        $ant = $r
+    }
+}
+Titulo "SILENCIOS (lado sem mensagens por mais de $GapSegundos s)"
+if ($Silencios.Count -eq 0) {
+    Write-Host "  Nenhum." -ForegroundColor Green
+} else {
+    foreach ($s in ($Silencios | Sort-Object De, Lado)) {
+        Write-Host ("  {0,-4} calado de {1:dd/MM HH:mm:ss.fff} ate {2:dd/MM HH:mm:ss.fff}  = {3}   (ultima MID {4}, volta com MID {5})" -f $s.Lado, $s.De, $s.Ate, (FmtDur $s.Seg), $s.Ultima, $s.Primeira) -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------
+# 6. PEDIDO x RESPOSTA (quem respondeu, quanto demorou, quem ficou sem resposta)
+# ---------------------------------------------------------------------
+# Regras da conversa:
+#   GALC 0001 -> PF 0002 | GALC 0042/0043/0060 -> PF 0005 | GALC 9999 -> PF 9999
+#   PF 0061 -> GALC 0062 | PF 0035 -> GALC 0036
+$Pend = @{}                 # chave -> fila de pedidos ainda sem resposta
+$Lat  = @{}                 # chave -> lista de tempos de resposta (s)
+$SemResp = New-Object System.Collections.Generic.List[object]
+$RespSolta = @{}            # chave -> respostas sem pedido
+
+function Fechar-Expirados {
+    param([string]$Chave, [datetime]$Agora)
+    if (-not $Pend.ContainsKey($Chave)) { return }
+    $fila = $Pend[$Chave]
+    while ($fila.Count -gt 0 -and (($Agora - $fila[0].DataHora).TotalSeconds -gt $TimeoutRespostaSeg)) {
+        $SemResp.Add([pscustomobject]@{ Chave = $Chave; Reg = $fila[0] })
+        $fila.RemoveAt(0)
+    }
+}
+
+foreach ($r in $Regs) {
+    $ChavePedido = $null
+    $ChaveResp = $null
+
+    if ($r.Lado -eq 'GALC') {
+        if ($r.MID -in '0001', '0042', '0043', '0060', '9999') { $ChavePedido = "GALC-$($r.MID)" }
+        elseif ($r.MID -eq '0062') { $ChaveResp = 'PF-0061' }
+        elseif ($r.MID -eq '0036') { $ChaveResp = 'PF-0035' }
+    } else {
+        if ($r.MID -in '0061', '0035') { $ChavePedido = "PF-$($r.MID)" }
+        elseif ($r.MID -eq '0002') { $ChaveResp = 'GALC-0001' }
+        elseif ($r.MID -eq '9999') { $ChaveResp = 'GALC-9999' }
+        elseif ($r.MID -in '0005', '0004' -and $r.Payload.Length -ge 4) { $ChaveResp = "GALC-$($r.Payload.Substring(0,4))" }
+    }
+
+    if ($ChavePedido) {
+        Fechar-Expirados -Chave $ChavePedido -Agora $r.DataHora
+        if (-not $Pend.ContainsKey($ChavePedido)) { $Pend[$ChavePedido] = New-Object System.Collections.Generic.List[object] }
+        $Pend[$ChavePedido].Add($r)
+    }
+    elseif ($ChaveResp) {
+        Fechar-Expirados -Chave $ChaveResp -Agora $r.DataHora
+        if ($Pend.ContainsKey($ChaveResp) -and $Pend[$ChaveResp].Count -gt 0) {
+            $ped = $Pend[$ChaveResp][0]
+            $Pend[$ChaveResp].RemoveAt(0)
+            if (-not $Lat.ContainsKey($ChaveResp)) { $Lat[$ChaveResp] = New-Object System.Collections.Generic.List[double] }
+            $Lat[$ChaveResp].Add(($r.DataHora - $ped.DataHora).TotalSeconds)
+        } else {
+            if (-not $RespSolta.ContainsKey($ChaveResp)) { $RespSolta[$ChaveResp] = 0 }
+            $RespSolta[$ChaveResp]++
+        }
+    }
+}
+# o que sobrou na fila ao final do arquivo tambem ficou sem resposta
+foreach ($k in $Pend.Keys) { foreach ($p in $Pend[$k]) { $SemResp.Add([pscustomobject]@{ Chave = $k; Reg = $p }) } }
+
+$Rotulos = @{
+    'GALC-0001' = 'GALC 0001 (abrir sessao)      -> PF 0002'
+    'GALC-0042' = 'GALC 0042 (bloquear)          -> PF 0005'
+    'GALC-0043' = 'GALC 0043 (liberar)           -> PF 0005'
+    'GALC-0060' = 'GALC 0060 (assinar resultado) -> PF 0005'
+    'GALC-9999' = 'GALC 9999 (keep alive)        -> PF 9999'
+    'PF-0061'   = 'PF   0061 (resultado aperto)  -> GALC 0062'
+    'PF-0035'   = 'PF   0035 (job info)          -> GALC 0036'
+}
+Titulo "PEDIDO x RESPOSTA (tempo de resposta em ms)"
+foreach ($k in 'GALC-9999', 'PF-0061', 'GALC-0042', 'GALC-0043', 'GALC-0001', 'GALC-0060', 'PF-0035') {
+    $pedidos = @($Regs | Where-Object { ($_.Lado -eq 'GALC' -and "GALC-$($_.MID)" -eq $k) -or ($_.Lado -eq 'PF' -and "PF-$($_.MID)" -eq $k) }).Count
+    if ($pedidos -eq 0) { continue }
+    $sem = @($SemResp | Where-Object { $_.Chave -eq $k }).Count
+    if ($Lat.ContainsKey($k) -and $Lat[$k].Count -gt 0) {
+        $st = $Lat[$k] | Measure-Object -Average -Maximum
+        $linha = "{0} : {1} pedidos | resposta media {2} ms, maxima {3} ms | SEM resposta: {4}" -f $Rotulos[$k], $pedidos, (Fmt ($st.Average * 1000) 0), (Fmt ($st.Maximum * 1000) 0), $sem
+    } else {
+        $linha = "{0} : {1} pedidos | NENHUMA resposta | SEM resposta: {2}" -f $Rotulos[$k], $pedidos, $sem
+    }
+    $cor = if ($sem -gt 0) { 'Yellow' } else { 'Green' }
+    Write-Host "  $linha" -ForegroundColor $cor
+}
+if ($SemResp.Count -gt 0) {
+    Write-Host "  Pedidos sem resposta (ate 15 primeiros):" -ForegroundColor Yellow
+    foreach ($s in ($SemResp | Sort-Object { $_.Reg.DataHora } | Select-Object -First 15)) {
+        Write-Host ("    {0:dd/MM HH:mm:ss.fff}  {1}  MID {2}  {3}" -f $s.Reg.DataHora, $s.Reg.Lado, $s.Reg.MID, $s.Reg.Nome) -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------
+# 7. PRODUCAO: APERTOS (MID 0061)
+# ---------------------------------------------------------------------
+$Apertos = New-Object System.Collections.Generic.List[object]
+foreach ($r in $Regs) {
+    if ($r.MID -ne '0061' -or $null -eq $r.Dados) { continue }
+    $d = $r.Dados
+    $Apertos.Add([pscustomobject][ordered]@{
+        Hora = $r.DataHora; VIN = (V $d '04').Trim(); Job = (V $d '05'); PSet = (V $d '06')
+        Status = (V $d '09'); StTorque = (V $d '10'); StAngulo = (V $d '11')
+        Torque = ([double](V $d '15') / 100); Angulo = [int](V $d '19'); IdAperto = (V $d '23')
+    })
+}
+
+Titulo "PRODUCAO (apertos MID 0061)"
+if ($Apertos.Count -eq 0) {
+    Write-Host "  Nenhum resultado de aperto neste log." -ForegroundColor Gray
+} else {
+    $ok  = @($Apertos | Where-Object { $_.Status -eq '1' }).Count
+    $nok = @($Apertos | Where-Object { $_.Status -ne '1' })
+    $vins = @($Apertos | Select-Object -ExpandProperty VIN -Unique)
+    $tq = $Apertos | Measure-Object -Property Torque -Minimum -Maximum -Average
+    Write-Host ("  Apertos: {0}  (OK {1} | NOK {2})  |  VINs distintos: {3}" -f $Apertos.Count, $ok, $nok.Count, $vins.Count)
+    Write-Host ("  Torque: minimo {0} | medio {1} | maximo {2} Nm" -f (Fmt $tq.Minimum 2), (Fmt $tq.Average 2), (Fmt $tq.Maximum 2))
+    Write-Host "  Apertos por hora:" -ForegroundColor Gray
+    $Apertos | Group-Object { $_.Hora.Hour } | Sort-Object { [int]$_.Name } | ForEach-Object {
+        Write-Host ("    {0:00}h : {1}" -f [int]$_.Name, $_.Count)
+    }
+    if ($nok.Count -gt 0) {
+        Write-Host "  Apertos NOK:" -ForegroundColor Yellow
+        foreach ($n in $nok) {
+            Write-Host ("    {0:HH:mm:ss}  VIN {1}  Job {2} PSet {3}  torque {4} Nm ({5})  angulo {6} ({7})" -f $n.Hora, $n.VIN, $n.Job, $n.PSet, (Fmt $n.Torque 2), $StatusLimite[$n.StTorque], $n.Angulo, $StatusLimite[$n.StAngulo]) -ForegroundColor Yellow
+        }
+    }
+    $teste = @($vins | Where-Object { $_ -match 'TEST' })
+    if ($teste.Count -gt 0) { Write-Host ("  VIN(s) de teste: {0}" -f ($teste -join ', ')) -ForegroundColor Gray }
+
+    # Jobs incompletos: quantidade esperada = numero de PSets distintos que cada Job usa no arquivo
+    $EsperadoPorJob = @{}
+    foreach ($g in ($Apertos | Group-Object Job)) { $EsperadoPorJob[$g.Name] = @($g.Group | Select-Object -ExpandProperty PSet -Unique).Count }
+    $Incompletos = New-Object System.Collections.Generic.List[object]
+    foreach ($g in ($Apertos | Group-Object VIN, Job)) {
+        $job = $g.Group[0].Job
+        $feitos = @($g.Group | Select-Object -ExpandProperty PSet -Unique).Count
+        if ($feitos -lt $EsperadoPorJob[$job]) {
+            $Incompletos.Add([pscustomobject]@{ VIN = $g.Group[0].VIN; Job = $job; Feitos = $feitos; Esperado = $EsperadoPorJob[$job]; Ultimo = $g.Group[$g.Group.Count - 1].Hora })
+        }
+    }
+    Write-Host "  Jobs INCOMPLETOS (menos PSets que o esperado para o Job):" -ForegroundColor Gray
+    if ($Incompletos.Count -eq 0) { Write-Host "    Nenhum." -ForegroundColor Green }
+    foreach ($i in $Incompletos) {
+        Write-Host ("    VIN {0}  Job {1}: {2} de {3} apertos, ultimo as {4:HH:mm:ss}" -f $i.VIN, $i.Job, $i.Feitos, $i.Esperado, $i.Ultimo) -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------
+# 8. MID 0035 (JOB INFO): rajadas de reenvio
+# ---------------------------------------------------------------------
+Titulo "MID 0035 - JOB INFO (o 'sinal de alerta')"
+$R35 = @($Regs | Where-Object { $_.MID -eq '0035' })
+$Tem0036 = @($Regs | Where-Object { $_.MID -eq '0036' }).Count
+$Rajadas = New-Object System.Collections.Generic.List[object]
+if ($R35.Count -eq 0) {
+    Write-Host "  Nenhum MID 0035 neste log." -ForegroundColor Green
+} else {
+    # agrupa 0035 iguais e proximos (menos de 15 s entre eles) = reenvios da mesma informacao
+    $atual = $null
+    foreach ($r in $R35) {
+        if ($null -ne $atual -and $r.Payload.Substring(0, [math]::Min(20, $r.Payload.Length)) -eq $atual.Chave -and (($r.DataHora - $atual.Itens[$atual.Itens.Count - 1].DataHora).TotalSeconds -lt 15)) {
+            $atual.Itens.Add($r)
+        } else {
+            $atual = [pscustomobject]@{ Chave = $r.Payload.Substring(0, [math]::Min(20, $r.Payload.Length)); Itens = (New-Object System.Collections.Generic.List[object]) }
+            $atual.Itens.Add($r)
+            $Rajadas.Add($atual)
+        }
+    }
+    Write-Host ("  {0} mensagem(ns) 0035 em {1} rajada(s). MID 0036 (ack do GALC) no log inteiro: {2}" -f $R35.Count, $Rajadas.Count, $Tem0036) -ForegroundColor Yellow
+    $n = 0
+    foreach ($rj in $Rajadas) {
+        $n++
+        $it = $rj.Itens
+        $ini = $it[0].DataHora; $fim = $it[$it.Count - 1].DataHora
+        $interv = if ($it.Count -gt 1) { (Fmt ((($fim - $ini).TotalSeconds) / ($it.Count - 1)) 2) + 's' } else { '-' }
+        Write-Host ("  Rajada {0}: {1} envios de {2:HH:mm:ss.fff} a {3:HH:mm:ss.fff} (intervalo medio {4})" -f $n, $it.Count, $ini, $fim, $interv)
+        Write-Host ("    {0}" -f $it[0].Detalhe)
+        $prox = $Regs | Where-Object { $_.Lado -eq 'PF' -and $_.DataHora -gt $fim } | Select-Object -First 1
+        if ($prox) { Write-Host ("    Depois do ultimo envio, o PF so voltou a falar {0} depois (MID {1})" -f (FmtDur ($prox.DataHora - $fim).TotalSeconds), $prox.MID) -ForegroundColor Yellow }
+    }
+}
+
+# ---------------------------------------------------------------------
+# 9. AUTOPSIA DAS EXCECOES JAVA
+# ---------------------------------------------------------------------
+$Excecoes = @($Eventos | Where-Object { $_.Tipo -eq 'EXCECAO' })
+
+# ---------------------------------------------------------------------
+# 9a. INCIDENTES: um por erro (SYSUT083) com ultima comunicacao, silencio e retorno
+# ---------------------------------------------------------------------
+# Definicoes (as mesmas que voce usa nos relatorios):
+#   ULTIMA COMUNICACAO = ultima mensagem de QUALQUER lado antes do erro
+#   RETORNO            = primeiro MID 0001 (GALC reabrindo a sessao) depois do erro
+#   SILENCIO           = erro - ultima comunicacao
+# Dois erros seguidos com a MESMA ultima comunicacao pertencem ao mesmo incidente.
+$Incs = New-Object System.Collections.Generic.List[object]
+$IncId = 0
+$UltChave = -1
+foreach ($ex in @($Excecoes | Sort-Object DataHora)) {
+    $t0 = $ex.DataHora
+    $ult     = $Regs | Where-Object { $_.DataHora -lt $t0 } | Select-Object -Last 1
+    $ultPF   = $Regs | Where-Object { $_.Lado -eq 'PF'   -and $_.DataHora -lt $t0 } | Select-Object -Last 1
+    $ultGALC = $Regs | Where-Object { $_.Lado -eq 'GALC' -and $_.DataHora -lt $t0 } | Select-Object -Last 1
+    $limiteRet = $t0.AddSeconds($JanelaRetornoSeg)
+    $volta   = $Regs | Where-Object { $_.MID -eq '0001' -and $_.DataHora -ge $t0 -and $_.DataHora -le $limiteRet } | Select-Object -First 1
+    $VoltaTipo = 'MID 0001'
+    if ($null -eq $volta) {
+        $volta = $Regs | Where-Object { $_.DataHora -gt $t0 } | Select-Object -First 1
+        $VoltaTipo = "primeira mensagem (sem 0001 em $JanelaRetornoSeg s)"
+    }
+
+    $chave = if ($ult) { $ult.DataHora.Ticks } else { -1 }
+    if ($chave -ne $UltChave) { $IncId++; $UltChave = $chave }
+
+    $sil = if ($ult) { ($t0 - $ult.DataHora).TotalSeconds } else { 0 }
+    $Classe = if ($sil -lt 30) { 'CURTO (parece timeout de sessao)' }
+              elseif ($sil -le $LimiteTravamentoSeg) { 'INTERMEDIARIO' }
+              else { 'POSSIVEL TRAVAMENTO (silencio longo)' }
+
+    # Quem calou primeiro? So da para dizer isso em dois casos; fora deles o log nao permite concluir,
+    # porque o PortConvertor esta NO MEIO e registra os dois lados.
+    $Quem = 'INDETERMINADO NO LOG (ultima troca completa: GALC, PortConvertor ou log parado)'
+    if ($ult -and $ult.Lado -eq 'GALC' -and $ult.MID -eq '9999' -and ($null -eq $ultPF -or $ultPF.DataHora -lt $ult.DataHora)) {
+        $Quem = 'LADO COM1 (GALC chamou o keep alive e nao houve resposta: PF, cabo serial ou leitura da serial)'
+    }
+    elseif ($ult -and $ult.Lado -eq 'PF' -and $ult.MID -in '0061', '0035') {
+        $Quem = 'LADO TCP (a PF mandou o pedido e nao houve o ack: GALC ou leitura do TCP)'
+    }
+
+    # Assinatura de "fila acumulada": varios 9999 do GALC logados colados no erro (liberados de uma vez)
+    $Fila = @($Regs | Where-Object { $_.Lado -eq 'GALC' -and $_.MID -eq '9999' -and $_.DataHora -ge $t0.AddSeconds(-3) -and $_.DataHora -le $t0.AddSeconds(3) }).Count
+
+    $Incs.Add([pscustomobject][ordered]@{
+        Arquivo             = (Split-Path -Leaf $Caminho)
+        Data                = $t0.ToString('dd/MM/yyyy')
+        IncidenteId         = $IncId
+        Codigo              = $ex.Codigo
+        LinhaErro           = $ex.Linha
+        ErroDataHora        = $t0.ToString('yyyy-MM-dd HH:mm:ss.fff')
+        UltimaComunicacao   = $(if ($ult) { $ult.DataHora.ToString('yyyy-MM-dd HH:mm:ss.fff') } else { '' })
+        UltimaLado          = $(if ($ult) { $ult.Lado } else { '' })
+        UltimaMID           = $(if ($ult) { $ult.MID } else { '' })
+        UltimaPF            = $(if ($ultPF) { $ultPF.DataHora.ToString('yyyy-MM-dd HH:mm:ss.fff') } else { '' })
+        UltimaGALC          = $(if ($ultGALC) { $ultGALC.DataHora.ToString('yyyy-MM-dd HH:mm:ss.fff') } else { '' })
+        SilencioSeg         = [math]::Round($sil, 1)
+        SilencioPFSeg       = $(if ($ultPF) { [math]::Round(($t0 - $ultPF.DataHora).TotalSeconds, 1) } else { '' })
+        Classificacao       = $Classe
+        QuemCalouPrimeiro   = $Quem
+        Retorno             = $(if ($volta) { $volta.DataHora.ToString('yyyy-MM-dd HH:mm:ss.fff') } else { '' })
+        RetornoTipo         = $VoltaTipo
+        ErroParaRetornoSeg  = $(if ($volta) { [math]::Round(($volta.DataHora - $t0).TotalSeconds, 1) } else { '' })
+        GALC9999PertoDoErro = $Fila
+    })
+}
+
+Titulo "INCIDENTES (1 por erro SYSUT083)"
+if ($Incs.Count -eq 0) { Write-Host "  Nenhum." -ForegroundColor Green }
+$n = 0
+foreach ($i in $Incs) {
+    $n++
+    $cor = if ($i.SilencioSeg -gt $LimiteTravamentoSeg) { 'Yellow' } else { 'Gray' }
+    if ($i.SilencioSeg -gt $LimiteTravamentoSeg) {
+        Write-Host ""
+        Write-Host "  POSSIVEL TRAVAMENTO DETECTADO" -ForegroundColor Yellow
+    }
+    Write-Host ("  Erro {0} (incidente {1}) - {2} na linha {3}" -f $n, $i.IncidenteId, $i.Codigo, $i.LinhaErro) -ForegroundColor $cor
+    Write-Host ("    Ultima comunicacao : {0}  ({1} MID {2})" -f $i.UltimaComunicacao.Substring(11), $i.UltimaLado, $i.UltimaMID)
+    Write-Host ("    Ultima do PF       : {0}   |   ultima do GALC: {1}" -f $(if ($i.UltimaPF) { $i.UltimaPF.Substring(11) } else { '-' }), $(if ($i.UltimaGALC) { $i.UltimaGALC.Substring(11) } else { '-' }))
+    Write-Host ("    Erro               : {0}" -f $i.ErroDataHora.Substring(11))
+    Write-Host ("    Silencio ate o erro: {0}  -> {1}" -f (FmtDur $i.SilencioSeg), $i.Classificacao) -ForegroundColor $cor
+    if ($i.SilencioPFSeg -is [double]) { Write-Host ("    Silencio so da PF  : {0}  (desde a ultima mensagem dela)" -f (FmtDur $i.SilencioPFSeg)) }
+    if ($i.Retorno -ne '') { Write-Host ("    Retorno            : {0}  ({1}; {2} depois do erro)" -f $i.Retorno.Substring(11), $i.RetornoTipo, (FmtDur ([double]$i.ErroParaRetornoSeg))) }
+    Write-Host ("    Quem calou primeiro: {0}" -f $i.QuemCalouPrimeiro)
+    Write-Host ("    9999 do GALC logados a +-3 s do erro: {0}  (3 ou mais = fila acumulada sendo liberada)" -f $i.GALC9999PertoDoErro)
+}
+
+Titulo "AUTOPSIA DAS EXCECOES JAVA"
+if ($Excecoes.Count -eq 0) { Write-Host "  Nenhuma excecao neste log." -ForegroundColor Green }
+foreach ($ex in $Excecoes) {
+    $t0 = $ex.DataHora
+    Write-Host ("  EXCECAO as {0:dd/MM HH:mm:ss.fff}" -f $t0) -ForegroundColor Red
+    Write-Host ("    {0}" -f $ex.Texto) -ForegroundColor Red
+
+    $ultPF   = $Regs | Where-Object { $_.Lado -eq 'PF'   -and $_.DataHora -le $t0 } | Select-Object -Last 1
+    $ultGALC = $Regs | Where-Object { $_.Lado -eq 'GALC' -and $_.DataHora -le $t0 } | Select-Object -Last 1
+    $reconex = $Regs | Where-Object { $_.MID -eq '0001' -and $_.DataHora -ge $t0 } | Select-Object -First 1
+    if ($ultPF)   { Write-Host ("    Ultima mensagem do PF  : {0} (MID {1}) = {2} ANTES da excecao" -f (Hora $ultPF.DataHora), $ultPF.MID, (FmtDur ($t0 - $ultPF.DataHora).TotalSeconds)) }
+    if ($ultGALC) { Write-Host ("    Ultima mensagem do GALC: {0} (MID {1}) = {2} antes da excecao" -f (Hora $ultGALC.DataHora), $ultGALC.MID, (FmtDur ($t0 - $ultGALC.DataHora).TotalSeconds)) }
+    if ($reconex) { Write-Host ("    GALC reabriu a sessao (MID 0001) as {0} = {1} DEPOIS da excecao" -f (Hora $reconex.DataHora), (FmtDur ($reconex.DataHora - $t0).TotalSeconds)) }
+    if ($ultPF -and $reconex) {
+        $pfVolta = $Regs | Where-Object { $_.Lado -eq 'PF' -and $_.DataHora -gt $ultPF.DataHora } | Select-Object -First 1
+        if ($pfVolta) { Write-Host ("    PF ficou {0} sem falar (de {1} a {2})" -f (FmtDur ($pfVolta.DataHora - $ultPF.DataHora).TotalSeconds), (Hora $ultPF.DataHora), (Hora $pfVolta.DataHora)) -ForegroundColor Yellow }
+    }
+
+    Write-Host ("    Linha do tempo de {0}s antes ate {1}s depois (keep alive incluso):" -f $JanelaAntesSeg, $JanelaDepoisSeg) -ForegroundColor Gray
+    $Janela = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Regs) {
+        if ($r.DataHora -ge $t0.AddSeconds(-$JanelaAntesSeg) -and $r.DataHora -le $t0.AddSeconds($JanelaDepoisSeg)) {
+            $sentido = if ($r.Lado -eq 'GALC') { 'GALC -> PF ' } else { 'PF -> GALC ' }
+            $Janela.Add([pscustomobject]@{ Hora = $r.DataHora; Sentido = $sentido; MID = $r.MID; Nome = $r.Nome; Detalhe = $r.Detalhe })
+        }
+    }
+    $Janela.Add([pscustomobject]@{ Hora = $t0; Sentido = '*** JAVA *** '; MID = '----'; Nome = 'EXCECAO'; Detalhe = 'java.lang.Exception no Transmitter' })
+    $Janela | Sort-Object Hora | ForEach-Object {
+        $cor = if ($_.MID -eq '----') { 'Red' } elseif ($_.MID -eq '0035') { 'Yellow' } elseif ($_.MID -eq '9999') { 'DarkGray' } else { 'Gray' }
+        Write-Host ("      {0}  {1} {2}  {3}" -f (Hora $_.Hora), $_.Sentido, $_.MID, $_.Detalhe) -ForegroundColor $cor
+    }
+}
+
+# ---------------------------------------------------------------------
+# 10. ACHADOS AUTOMATICOS (hipoteses, nao conclusoes)
+# ---------------------------------------------------------------------
+Titulo "ACHADOS AUTOMATICOS"
+$Achados = New-Object System.Collections.Generic.List[string]
+
+foreach ($pc in @($Eventos | Where-Object { $_.Tipo -eq 'INICIO_PORTCONVERTOR' })) {
+    $antes = $Regs | Where-Object { $_.DataHora -lt $pc.DataHora } | Select-Object -Last 1
+    if ($antes) {
+        $dur = ($pc.DataHora - $antes.DataHora).TotalSeconds
+        if ($dur -gt 300) {
+            $Achados.Add(("PortConvertor iniciou as {0:HH:mm:ss} depois de {1} sem NENHUMA mensagem (ultima as {2:HH:mm:ss}). Processo parado/congelado ou maquina fora do ar nesse periodo." -f $pc.DataHora, (FmtDur $dur), $antes.DataHora))
+        }
+    }
+    $prim = $Regs | Where-Object { $_.MID -eq '0001' -and $_.DataHora -gt $pc.DataHora } | Select-Object -First 1
+    if ($prim) { $Achados.Add(("Depois do inicio das {0:HH:mm:ss}, o GALC so abriu sessao (0001) as {1:HH:mm:ss} ({2} depois)." -f $pc.DataHora, $prim.DataHora, (FmtDur ($prim.DataHora - $pc.DataHora).TotalSeconds))) }
+}
+foreach ($ex in $Excecoes) {
+    $ultPF = $Regs | Where-Object { $_.Lado -eq 'PF' -and $_.DataHora -le $ex.DataHora } | Select-Object -Last 1
+    if ($ultPF) {
+        $d = ($ex.DataHora - $ultPF.DataHora).TotalSeconds
+        $dTxt = (Fmt $d 1) + 's'
+        $extra = if ($d -le 30) { "Perto de 15 s: compativel com o 'session timeout' do diagrama." } else { "Silencio longo: nao e um timeout curto; compativel com processo/console pausado [A CONFIRMAR]." }
+        $Achados.Add(("Excecao as {0:HH:mm:ss} veio {1} depois da ultima mensagem do PF (MID {2}). {3}" -f $ex.DataHora, $dTxt, $ultPF.MID, $extra))
+    }
+}
+if ($R35.Count -gt 0 -and $Tem0036 -eq 0) {
+    $Achados.Add("O GALC NUNCA mandou 0036 (ack do Job info), entao o PF reenviou o 0035 ($($R35.Count) vezes no total). Verifique se o GALC realmente trata o 0035.")
+}
+foreach ($rj in $Rajadas) {
+    $fim = $rj.Itens[$rj.Itens.Count - 1].DataHora
+    $exDepois = $Excecoes | Where-Object { $_.DataHora -ge $fim -and ($_.DataHora - $fim).TotalSeconds -lt 60 } | Select-Object -First 1
+    if ($exDepois) { $Achados.Add(("Rajada de 0035 ({0} envios) terminada as {1:HH:mm:ss} foi seguida de excecao Java {2} depois." -f $rj.Itens.Count, $fim, (FmtDur ($exDepois.DataHora - $fim).TotalSeconds))) }
+}
+$gl = @($Eventos | Where-Object { $_.Tipo -eq 'INICIO_GALC' }).Count
+$gf = @($Eventos | Where-Object { $_.Tipo -eq 'GALC_FALHA' }).Count
+if ($gl -gt 1 -or $gf -gt 0) { $Achados.Add("O GALC foi iniciado $gl vez(es) neste console e falhou $gf vez(es). Veja a secao de eventos para os horarios (alguem reiniciando o GALC a mao?).") }
+if ($SemResp.Count -gt 0) { $Achados.Add("$($SemResp.Count) pedido(s) ficaram sem resposta dentro de $TimeoutRespostaSeg s (detalhe na secao Pedido x Resposta).") }
+$Ruins = @($Regs | Where-Object { -not $_.TamOk }).Count
+if ($Ruins -gt 0) { $Achados.Add("$Ruins mensagem(ns) com tamanho diferente do declarado no cabecalho.") }
+
+if ($Achados.Count -eq 0) { Write-Host "  Nada anormal encontrado." -ForegroundColor Green }
+foreach ($a in $Achados) { Write-Host "  [!] $a" -ForegroundColor Yellow }
+
+if ($Desconhecidas.Count -gt 0) {
+    Titulo "LINHAS NAO RECONHECIDAS (ate 10)"
+    $Desconhecidas | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+}
+
+# ---------------------------------------------------------------------
+# 11a. RESUMO PARA RELATORIO (copiar e colar) + exportacoes de incidentes
+# ---------------------------------------------------------------------
+Titulo "RESUMO PARA RELATORIO"
+$Rel = New-Object System.Collections.Generic.List[string]
+$DataTxt = $Primeiro.ToString('dd/MM/yyyy')
+if ($Ultimo.Date -ne $Primeiro.Date) { $DataTxt += ' a ' + $Ultimo.ToString('dd/MM/yyyy') }
+$Rel.Add("Data: $DataTxt")
+$Rel.Add("Arquivo: " + (Split-Path -Leaf $Caminho))
+$Rel.Add("")
+if ($Incs.Count -eq 0) {
+    $Rel.Add("SYSUT083 encontrados: 0")
+} else {
+    foreach ($g in ($Incs | Group-Object Codigo | Sort-Object Name)) {
+        $Rel.Add(("{0} encontrados: {1} (em {2} incidente(s))" -f $g.Name, $g.Count, @($g.Group | Select-Object -ExpandProperty IncidenteId -Unique).Count))
+    }
+    $k = 0
+    foreach ($i in $Incs) {
+        $k++
+        $Rel.Add("")
+        $Rel.Add("Erro ${k}:")
+        $Rel.Add(("  Ultima comunicacao: {0}  ({1} MID {2})" -f $i.UltimaComunicacao.Substring(11), $i.UltimaLado, $i.UltimaMID))
+        $Rel.Add(("  Erro: {0}  ({1}, linha {2})" -f $i.ErroDataHora.Substring(11), $i.Codigo, $i.LinhaErro))
+        if ($i.Retorno -ne '') { $Rel.Add(("  Retorno: {0}  ({1})" -f $i.Retorno.Substring(11), $i.RetornoTipo)) }
+        $Rel.Add(("  Silencio antes do erro: {0}  -> {1}" -f (FmtDur $i.SilencioSeg), $i.Classificacao))
+        if ($i.SilencioPFSeg -is [double]) { $Rel.Add(("  Silencio so da PF: {0}" -f (FmtDur $i.SilencioPFSeg))) }
+        $Rel.Add(("  Quem calou primeiro (indicio): {0}" -f $i.QuemCalouPrimeiro))
+    }
+    $total = $Incs.Count
+    $comSil = @($Incs | Where-Object { $_.SilencioSeg -ge $GapSegundos -or ($_.SilencioPFSeg -is [double] -and $_.SilencioPFSeg -ge $GapSegundos) }).Count
+    $longos = @($Incs | Where-Object { $_.SilencioSeg -gt $LimiteTravamentoSeg }).Count
+    $Rel.Add("")
+    $Rel.Add("Conclusao (automatica, apenas indicio):")
+    if ($comSil -gt 0) {
+        $Rel.Add("  - Em $comSil de $total erro(s) algum lado (qualquer um, ou so a PF) ficou pelo menos $GapSegundos s sem falar ANTES do erro: a interrupcao de comunicacao precede o SYSUT083.")
+    } else {
+        $Rel.Add("  - Nenhum erro foi precedido de silencio de $GapSegundos s ou mais: a hipotese 'interrupcao antes do SYSUT083' NAO se sustenta neste arquivo.")
+    }
+    if ($longos -gt 0) { $Rel.Add("  - $longos erro(s) com silencio acima de $LimiteTravamentoSeg s: possivel travamento (processo ou console pausado), nao timeout curto.") }
+    $Rel.Add("  - O log ainda NAO prova quem parou primeiro (GALC, PortConvertor ou PowerFocus): o PortConvertor registra os dois lados.")
+}
+foreach ($l in $Rel) { Write-Host "  $l" }
+
+if ($RelatorioTxt -ne '') {
+    $Rel | Out-File -FilePath $RelatorioTxt -Encoding UTF8
+    Write-Host ""
+    Write-Host "Relatorio gravado em: $RelatorioTxt" -ForegroundColor Green
+}
+if ($IncidentesCsv -ne '' -and $Incs.Count -gt 0) {
+    $Incs | Export-Csv -Path $IncidentesCsv -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Write-Host "Incidentes exportados em: $IncidentesCsv" -ForegroundColor Green
+}
+$global:ResumoLog = [pscustomobject]@{ Arquivo = (Split-Path -Leaf $Caminho); Mensagens = $Regs.Count; Inicio = $Primeiro; Fim = $Ultimo; Erros = $Incs.Count }
+
+if ($CsvSaida -ne '') {
+    $Regs | Select-Object Linha, @{N = 'DataHora'; E = { $_.DataHora.ToString('yyyy-MM-dd HH:mm:ss.fff') }}, Lado, Thread, MID, Nome, Rev, Comp, TamOk, Detalhe, Payload |
+        Export-Csv -Path $CsvSaida -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Write-Host ""
+    Write-Host "CSV exportado em: $CsvSaida" -ForegroundColor Green
+}
+
+}   # fim do bloco que so roda quando ha mensagens
+
+# ---------------------------------------------------------------------
+# 11. CHECAGEM LOCAL OPCIONAL: QUICKEDIT DO CONSOLE (rode na maquina do posto)
+# ---------------------------------------------------------------------
+# QuickEdit ligado: clicar com o mouse dentro do console congela o programa ate apertar ENTER/ESC.
+if ($ChecarQuickEdit) {
+    Titulo "QUICKEDIT DO CONSOLE (esta maquina)"
+    try {
+        $padrao = Get-ItemProperty -Path 'HKCU:\Console' -ErrorAction Stop
+        $qe = if ($null -ne $padrao.QuickEdit) { $padrao.QuickEdit } else { '(nao definido; Windows usa o padrao do sistema)' }
+        Write-Host "  Padrao de todos os consoles (HKCU:\Console\QuickEdit): $qe"
+        Get-ChildItem 'HKCU:\Console' -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            if ($null -ne $p.QuickEdit) { Write-Host ("  Janela/atalho '{0}': QuickEdit = {1}" -f $_.PSChildName, $p.QuickEdit) }
+        }
+        Write-Host "  (1 = ligado, pode congelar ao clicar | 0 = desligado)." -ForegroundColor Gray
+        Write-Host "  Obs.: o programa tambem pode mudar isso sozinho; o registro mostra so o padrao do atalho/janela." -ForegroundColor Gray
+    } catch {
+        Write-Host "  Nao consegui ler o registro (precisa ser rodado no Windows)." -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+Write-Host ("Tempo de analise: {0:N1}s" -f ((Get-Date) - $Inicio).TotalSeconds) -ForegroundColor DarkGray
+Write-Host "==============================================================" -ForegroundColor Cyan
