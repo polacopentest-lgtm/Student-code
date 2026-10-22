@@ -1,0 +1,189 @@
+@($Apertos | Where-Object { $_.Status -ne '1' })
+    $vins = @($Apertos | Select-Object -ExpandProperty VIN -Unique)
+    $tq = $Apertos | Measure-Object -Property Torque -Minimum -Maximum -Average
+    Write-Host ("  Apertos: {0}  (OK {1} | NOK {2})  |  VINs distintos: {3}" -f $Apertos.Count, $ok, $nok.Count, $vins.Count)
+    Write-Host ("  Torque: minimo {0} | medio {1} | maximo {2} Nm" -f (Fmt $tq.Minimum 2), (Fmt $tq.Average 2), (Fmt $tq.Maximum 2))
+    Write-Host "  Apertos por hora:" -ForegroundColor Gray
+    $Apertos | Group-Object { $_.Hora.Hour } | Sort-Object { [int]$_.Name } | ForEach-Object {
+        Write-Host ("    {0:00}h : {1}" -f [int]$_.Name, $_.Count)
+    }
+    if ($nok.Count -gt 0) {
+        Write-Host "  Apertos NOK:" -ForegroundColor Yellow
+        foreach ($n in $nok) {
+            Write-Host ("    {0:HH:mm:ss}  VIN {1}  Job {2} PSet {3}  torque {4} Nm ({5})  angulo {6} ({7})" -f $n.Hora, $n.VIN, $n.Job, $n.PSet, (Fmt $n.Torque 2), $StatusLimite[$n.StTorque], $n.Angulo, $StatusLimite[$n.StAngulo]) -ForegroundColor Yellow
+        }
+    }
+    $teste = @($vins | Where-Object { $_ -match 'TEST' })
+    if ($teste.Count -gt 0) { Write-Host ("  VIN(s) de teste: {0}" -f ($teste -join ', ')) -ForegroundColor Gray }
+
+    # Jobs incompletos: quantidade esperada = numero de PSets distintos que cada Job usa no arquivo
+    $EsperadoPorJob = @{}
+    foreach ($g in ($Apertos | Group-Object Job)) { $EsperadoPorJob[$g.Name] = @($g.Group | Select-Object -ExpandProperty PSet -Unique).Count }
+    $Incompletos = New-Object System.Collections.Generic.List[object]
+    foreach ($g in ($Apertos | Group-Object VIN, Job)) {
+        $job = $g.Group[0].Job
+        $feitos = @($g.Group | Select-Object -ExpandProperty PSet -Unique).Count
+        if ($feitos -lt $EsperadoPorJob[$job]) {
+            $Incompletos.Add([pscustomobject]@{ VIN = $g.Group[0].VIN; Job = $job; Feitos = $feitos; Esperado = $EsperadoPorJob[$job]; Ultimo = $g.Group[$g.Group.Count - 1].Hora })
+        }
+    }
+    Write-Host "  Jobs INCOMPLETOS (menos PSets que o esperado para o Job):" -ForegroundColor Gray
+    if ($Incompletos.Count -eq 0) { Write-Host "    Nenhum." -ForegroundColor Green }
+    foreach ($i in $Incompletos) {
+        Write-Host ("    VIN {0}  Job {1}: {2} de {3} apertos, ultimo as {4:HH:mm:ss}" -f $i.VIN, $i.Job, $i.Feitos, $i.Esperado, $i.Ultimo) -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------
+# 8. MID 0035 (JOB INFO): rajadas de reenvio
+# ---------------------------------------------------------------------
+Titulo "MID 0035 - JOB INFO (o 'sinal de alerta')"
+$R35 = @($Regs | Where-Object { $_.MID -eq '0035' })
+$Tem0036 = @($Regs | Where-Object { $_.MID -eq '0036' }).Count
+$Rajadas = New-Object System.Collections.Generic.List[object]
+if ($R35.Count -eq 0) {
+    Write-Host "  Nenhum MID 0035 neste log." -ForegroundColor Green
+} else {
+    # agrupa 0035 iguais e proximos (menos de 15 s entre eles) = reenvios da mesma informacao
+    $atual = $null
+    foreach ($r in $R35) {
+        if ($null -ne $atual -and $r.Payload.Substring(0, [math]::Min(20, $r.Payload.Length)) -eq $atual.Chave -and (($r.DataHora - $atual.Itens[$atual.Itens.Count - 1].DataHora).TotalSeconds -lt 15)) {
+            $atual.Itens.Add($r)
+        } else {
+            $atual = [pscustomobject]@{ Chave = $r.Payload.Substring(0, [math]::Min(20, $r.Payload.Length)); Itens = (New-Object System.Collections.Generic.List[object]) }
+            $atual.Itens.Add($r)
+            $Rajadas.Add($atual)
+        }
+    }
+    Write-Host ("  {0} mensagem(ns) 0035 em {1} rajada(s). MID 0036 (ack do GALC) no log inteiro: {2}" -f $R35.Count, $Rajadas.Count, $Tem0036) -ForegroundColor Yellow
+    $n = 0
+    foreach ($rj in $Rajadas) {
+        $n++
+        $it = $rj.Itens
+        $ini = $it[0].DataHora; $fim = $it[$it.Count - 1].DataHora
+        $interv = if ($it.Count -gt 1) { (Fmt ((($fim - $ini).TotalSeconds) / ($it.Count - 1)) 2) + 's' } else { '-' }
+        Write-Host ("  Rajada {0}: {1} envios de {2:HH:mm:ss.fff} a {3:HH:mm:ss.fff} (intervalo medio {4})" -f $n, $it.Count, $ini, $fim, $interv)
+        Write-Host ("    {0}" -f $it[0].Detalhe)
+        $prox = $Regs | Where-Object { $_.Lado -eq 'PF' -and $_.DataHora -gt $fim } | Select-Object -First 1
+        if ($prox) { Write-Host ("    Depois do ultimo envio, o PF so voltou a falar {0} depois (MID {1})" -f (FmtDur ($prox.DataHora - $fim).TotalSeconds), $prox.MID) -ForegroundColor Yellow }
+    }
+}
+
+# ---------------------------------------------------------------------
+# 9. AUTOPSIA DAS EXCECOES JAVA
+# ---------------------------------------------------------------------
+$Excecoes = @($Eventos | Where-Object { $_.Tipo -eq 'EXCECAO' })
+Titulo "AUTOPSIA DAS EXCECOES JAVA"
+if ($Excecoes.Count -eq 0) { Write-Host "  Nenhuma excecao neste log." -ForegroundColor Green }
+foreach ($ex in $Excecoes) {
+    $t0 = $ex.DataHora
+    Write-Host ("  EXCECAO as {0:dd/MM HH:mm:ss.fff}" -f $t0) -ForegroundColor Red
+    Write-Host ("    {0}" -f $ex.Texto) -ForegroundColor Red
+
+    $ultPF   = $Regs | Where-Object { $_.Lado -eq 'PF'   -and $_.DataHora -le $t0 } | Select-Object -Last 1
+    $ultGALC = $Regs | Where-Object { $_.Lado -eq 'GALC' -and $_.DataHora -le $t0 } | Select-Object -Last 1
+    $reconex = $Regs | Where-Object { $_.MID -eq '0001' -and $_.DataHora -ge $t0 } | Select-Object -First 1
+    if ($ultPF)   { Write-Host ("    Ultima mensagem do PF  : {0} (MID {1}) = {2} ANTES da excecao" -f (Hora $ultPF.DataHora), $ultPF.MID, (FmtDur ($t0 - $ultPF.DataHora).TotalSeconds)) }
+    if ($ultGALC) { Write-Host ("    Ultima mensagem do GALC: {0} (MID {1}) = {2} antes da excecao" -f (Hora $ultGALC.DataHora), $ultGALC.MID, (FmtDur ($t0 - $ultGALC.DataHora).TotalSeconds)) }
+    if ($reconex) { Write-Host ("    GALC reabriu a sessao (MID 0001) as {0} = {1} DEPOIS da excecao" -f (Hora $reconex.DataHora), (FmtDur ($reconex.DataHora - $t0).TotalSeconds)) }
+    if ($ultPF -and $reconex) {
+        $pfVolta = $Regs | Where-Object { $_.Lado -eq 'PF' -and $_.DataHora -gt $ultPF.DataHora } | Select-Object -First 1
+        if ($pfVolta) { Write-Host ("    PF ficou {0} sem falar (de {1} a {2})" -f (FmtDur ($pfVolta.DataHora - $ultPF.DataHora).TotalSeconds), (Hora $ultPF.DataHora), (Hora $pfVolta.DataHora)) -ForegroundColor Yellow }
+    }
+
+    Write-Host ("    Linha do tempo de {0}s antes ate {1}s depois (keep alive incluso):" -f $JanelaAntesSeg, $JanelaDepoisSeg) -ForegroundColor Gray
+    $Janela = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Regs) {
+        if ($r.DataHora -ge $t0.AddSeconds(-$JanelaAntesSeg) -and $r.DataHora -le $t0.AddSeconds($JanelaDepoisSeg)) {
+            $sentido = if ($r.Lado -eq 'GALC') { 'GALC -> PF ' } else { 'PF -> GALC ' }
+            $Janela.Add([pscustomobject]@{ Hora = $r.DataHora; Sentido = $sentido; MID = $r.MID; Nome = $r.Nome; Detalhe = $r.Detalhe })
+        }
+    }
+    $Janela.Add([pscustomobject]@{ Hora = $t0; Sentido = '*** JAVA *** '; MID = '----'; Nome = 'EXCECAO'; Detalhe = 'java.lang.Exception no Transmitter' })
+    $Janela | Sort-Object Hora | ForEach-Object {
+        $cor = if ($_.MID -eq '----') { 'Red' } elseif ($_.MID -eq '0035') { 'Yellow' } elseif ($_.MID -eq '9999') { 'DarkGray' } else { 'Gray' }
+        Write-Host ("      {0}  {1} {2}  {3}" -f (Hora $_.Hora), $_.Sentido, $_.MID, $_.Detalhe) -ForegroundColor $cor
+    }
+}
+
+# ---------------------------------------------------------------------
+# 10. ACHADOS AUTOMATICOS (hipoteses, nao conclusoes)
+# ---------------------------------------------------------------------
+Titulo "ACHADOS AUTOMATICOS"
+$Achados = New-Object System.Collections.Generic.List[string]
+
+foreach ($pc in @($Eventos | Where-Object { $_.Tipo -eq 'INICIO_PORTCONVERTOR' })) {
+    $antes = $Regs | Where-Object { $_.DataHora -lt $pc.DataHora } | Select-Object -Last 1
+    if ($antes) {
+        $dur = ($pc.DataHora - $antes.DataHora).TotalSeconds
+        if ($dur -gt 300) {
+            $Achados.Add(("PortConvertor iniciou as {0:HH:mm:ss} depois de {1} sem NENHUMA mensagem (ultima as {2:HH:mm:ss}). Processo parado/congelado ou maquina fora do ar nesse periodo." -f $pc.DataHora, (FmtDur $dur), $antes.DataHora))
+        }
+    }
+    $prim = $Regs | Where-Object { $_.MID -eq '0001' -and $_.DataHora -gt $pc.DataHora } | Select-Object -First 1
+    if ($prim) { $Achados.Add(("Depois do inicio das {0:HH:mm:ss}, o GALC so abriu sessao (0001) as {1:HH:mm:ss} ({2} depois)." -f $pc.DataHora, $prim.DataHora, (FmtDur ($prim.DataHora - $pc.DataHora).TotalSeconds))) }
+}
+foreach ($ex in $Excecoes) {
+    $ultPF = $Regs | Where-Object { $_.Lado -eq 'PF' -and $_.DataHora -le $ex.DataHora } | Select-Object -Last 1
+    if ($ultPF) {
+        $d = ($ex.DataHora - $ultPF.DataHora).TotalSeconds
+        $dTxt = (Fmt $d 1) + 's'
+        $Achados.Add(("Excecao as {0:HH:mm:ss} veio {1} depois da ultima mensagem do PF (MID {2}). Se isso se repetir perto de 15 s, bate com o 'session timeout de ~15 s sem comunicacao'." -f $ex.DataHora, $dTxt, $ultPF.MID))
+    }
+}
+if ($R35.Count -gt 0 -and $Tem0036 -eq 0) {
+    $Achados.Add("O GALC NUNCA mandou 0036 (ack do Job info), entao o PF reenviou o 0035 ($($R35.Count) vezes no total). Verifique se o GALC realmente trata o 0035.")
+}
+foreach ($rj in $Rajadas) {
+    $fim = $rj.Itens[$rj.Itens.Count - 1].DataHora
+    $exDepois = $Excecoes | Where-Object { $_.DataHora -ge $fim -and ($_.DataHora - $fim).TotalSeconds -lt 60 } | Select-Object -First 1
+    if ($exDepois) { $Achados.Add(("Rajada de 0035 ({0} envios) terminada as {1:HH:mm:ss} foi seguida de excecao Java {2} depois." -f $rj.Itens.Count, $fim, (FmtDur ($exDepois.DataHora - $fim).TotalSeconds))) }
+}
+$gl = @($Eventos | Where-Object { $_.Tipo -eq 'INICIO_GALC' }).Count
+$gf = @($Eventos | Where-Object { $_.Tipo -eq 'GALC_FALHA' }).Count
+if ($gl -gt 1 -or $gf -gt 0) { $Achados.Add("O GALC foi iniciado $gl vez(es) neste console e falhou $gf vez(es). Veja a secao de eventos para os horarios (alguem reiniciando o GALC a mao?).") }
+if ($SemResp.Count -gt 0) { $Achados.Add("$($SemResp.Count) pedido(s) ficaram sem resposta dentro de $TimeoutRespostaSeg s (detalhe na secao Pedido x Resposta).") }
+$Ruins = @($Regs | Where-Object { -not $_.TamOk }).Count
+if ($Ruins -gt 0) { $Achados.Add("$Ruins mensagem(ns) com tamanho diferente do declarado no cabecalho.") }
+
+if ($Achados.Count -eq 0) { Write-Host "  Nada anormal encontrado." -ForegroundColor Green }
+foreach ($a in $Achados) { Write-Host "  [!] $a" -ForegroundColor Yellow }
+
+if ($Desconhecidas.Count -gt 0) {
+    Titulo "LINHAS NAO RECONHECIDAS (ate 10)"
+    $Desconhecidas | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+}
+
+if ($CsvSaida -ne '') {
+    $Regs | Select-Object Linha, @{N = 'DataHora'; E = { $_.DataHora.ToString('yyyy-MM-dd HH:mm:ss.fff') }}, Lado, Thread, MID, Nome, Rev, Comp, TamOk, Detalhe, Payload |
+        Export-Csv -Path $CsvSaida -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Write-Host ""
+    Write-Host "CSV exportado em: $CsvSaida" -ForegroundColor Green
+}
+
+}   # fim do bloco que so roda quando ha mensagens
+
+# ---------------------------------------------------------------------
+# 11. CHECAGEM LOCAL OPCIONAL: QUICKEDIT DO CONSOLE (rode na maquina do posto)
+# ---------------------------------------------------------------------
+# QuickEdit ligado: clicar com o mouse dentro do console congela o programa ate apertar ENTER/ESC.
+if ($ChecarQuickEdit) {
+    Titulo "QUICKEDIT DO CONSOLE (esta maquina)"
+    try {
+        $padrao = Get-ItemProperty -Path 'HKCU:\Console' -ErrorAction Stop
+        $qe = if ($null -ne $padrao.QuickEdit) { $padrao.QuickEdit } else { '(nao definido; Windows usa o padrao do sistema)' }
+        Write-Host "  Padrao de todos os consoles (HKCU:\Console\QuickEdit): $qe"
+        Get-ChildItem 'HKCU:\Console' -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            if ($null -ne $p.QuickEdit) { Write-Host ("  Janela/atalho '{0}': QuickEdit = {1}" -f $_.PSChildName, $p.QuickEdit) }
+        }
+        Write-Host "  (1 = ligado, pode congelar ao clicar | 0 = desligado)." -ForegroundColor Gray
+        Write-Host "  Obs.: o programa tambem pode mudar isso sozinho; o registro mostra so o padrao do atalho/janela." -ForegroundColor Gray
+    } catch {
+        Write-Host "  Nao consegui ler o registro (precisa ser rodado no Windows)." -ForegroundColor Yellow
+    }
+}
+
+Write-Host ""
+Write-Host ("Tempo de analise: {0:N1}s" -f ((Get-Date) - $Inicio).TotalSeconds) -ForegroundColor DarkGray
+Write-Host "==============================================================" -ForegroundColor Cyan
