@@ -1,1 +1,239 @@
+﻿# ============================================================
+#  QUIZ ESTAÇÕES - Hostname / Nome / Local
+#  Como rodar:  .\quiz-estacoes.ps1
+#  Dicas no jogo:  ?  = mostra uma dica   |   sair  = encerra
+# ============================================================
 
+function E($h, $l, $n) { [pscustomobject]@{ Host = $h; Local = $l; Nome = $n } }
+
+$estacoes = @(
+    E 'ITIPRD0001' ''          'Webkit'
+    E 'ITIPRD0005' ''          'Lavadora'
+    E 'ITIPRD0103' ''          'Floor'
+    E 'ITIPRD0112' ''          'Solda OFF'
+    E 'ITIPRD0113' ''          'Solda ON'
+    E 'ITIPRD0114' ''          'VIN Machine'
+    E 'ITIPRD0200' ''          'PBSOUT'
+    E 'ITIPRD0201' ''          'PTA ON'
+    E 'ITIPRD0202' ''          'PBSOFF'
+    E 'ITIPRD0203' ''          'PTA OFF'
+    E 'ITIPRD0300' ''          'IFI ON'
+    E 'ITIPRD0301' ''          'Shower OFF'
+    E 'ITIPRD0302' ''          'Shower ON'
+    E 'ITIPRD0304' ''          'IFI OFF Reinspeção'
+    E 'ITIPRD0501' 'Wiring'    'SRS01'
+    E 'ITIPRD0502' 'Interior'  'SRS02'
+    E 'ITIPRD0503' 'Interior'  'SRS03'
+    E 'ITIPRD0504' 'Interior'  'SRS04'
+    E 'ITIPRD0505' 'Chassi'    'SRS05'
+    E 'ITIPRD0506' 'Chassi'    'SRS06'
+    E 'ITIPRD0507' 'Chassi'    'SRS07'
+    E 'ITIPRD0508' 'Exterior'  'SRS08'
+    E 'ITIPRD0509' 'Exterior'  'SRS09'
+    E 'ITIPRD0510' 'Exterior'  'SRS10'
+    E 'ITIPRD0512' 'Wiring'    'Galc On'
+    E 'ITIPRD0513' 'Chassi'    'Dress ON'
+    E 'ITIPRD0514' 'Reparo'    'SRS11'
+    E 'ITIPRD0515' 'Exterior'  'SRS12'
+    E 'ITIPRD0516' 'Chassi'    'SRS13'
+    E 'ITIPRD0517' 'Final'     'LMO OFF'
+    E 'ITIPRD0518' 'Exterior'  'SRS Checker'
+    E 'ITIPRD0519' 'Final'     'Reparo SRS Checker'
+    E 'ITIPRD0540' 'Complex'   'Immobilizer'
+    E 'ITIPRD0542' 'Chassi'    'Fecombine'
+    E 'ITIPRD0544' 'Chassi'    'Low Arm'
+    E 'ITIPRD0550' 'Wiring'    'Sequor ON'
+    E 'ITIPRD0570' 'Final'     'Sequor OFF'
+    E 'ITIPRD0580' 'Final'     'PQR'
+    E 'ITIPRD0591' 'Chassi'    'Entrada Motor'
+    E 'ITIPRD0593' 'Chassi'    'Knucle L'
+    E 'ITIPRD0594' 'Chassi'    'Knucle R'
+    E 'ITIPRD0605' 'Interior'  'Antifurto'
+    E 'ITIPRD0606' 'Chassi'    'Eixo Traseiro'
+    E 'ITIPRD0607' 'Chassi'    'Eixo Traseiro'
+    E 'ITIPRD0620' 'Chassi'    'Tirod R e L'
+    E 'ITIPRD0622' 'Chassi'    'Multifusion'
+    E 'ITIPRD0623' 'Chassi'    'Yoke'
+    E 'ITIPRD0625' 'Chassi'    'Centr. Volante'
+    E 'ITIPRD0630' 'Chassi'    'Brake Pipe Body'
+    E 'ITIPRD0631' 'Chassi'    'Gear Box'
+)
+
+# ---------- Funções auxiliares ----------
+
+# Maiúsculo, sem acento, sem espaço/hífen/ponto -> compara sem frescura
+function Limpar([string]$t) {
+    $t = $t.Trim().ToUpper().Normalize([Text.NormalizationForm]::FormD)
+    $t = $t -replace '\p{Mn}', ''
+    return $t -replace '[\s\-\._]', ''
+}
+
+# Para hostname: aceita só os 4 números (ex: 0504)
+function NormHost([string]$t) {
+    $x = Limpar $t
+    if ($x -match '^\d{4}$') { $x = 'ITIPRD' + $x }
+    return $x
+}
+
+function MostrarTabela($lista) {
+    $grupos = $lista | Group-Object { if ($_.Local) { $_.Local } else { 'Sem área' } }
+    foreach ($g in $grupos) {
+        Write-Host ""
+        Write-Host "== $($g.Name) ==" -ForegroundColor Cyan
+        foreach ($e in $g.Group) {
+            Write-Host ("  {0}   {1}" -f $e.Host, $e.Nome)
+        }
+    }
+    Write-Host ""
+}
+
+# Faz UMA pergunta. Retorna $true (acertou), $false (errou) ou $null (sair)
+function Perguntar($e, [int]$tipo) {
+    switch ($tipo) {
+        1 {
+            $perg    = "Qual o NOME do host $($e.Host)?"
+            $mostrar = @($e.Nome)
+        }
+        2 {
+            $perg    = "Qual o HOSTNAME de '$($e.Nome)'?"
+            # se houver nomes repetidos (ex: Eixo Traseiro), aceita qualquer um
+            $mostrar = @($estacoes | Where-Object { (Limpar $_.Nome) -eq (Limpar $e.Nome) } | ForEach-Object { $_.Host })
+        }
+        3 {
+            $perg    = "Em qual LOCAL fica o host $($e.Host)?"
+            $mostrar = @($e.Local)
+        }
+        4 {
+            $perg    = "Em qual LOCAL fica '$($e.Nome)'?"
+            $mostrar = @($e.Local)
+        }
+    }
+
+    $primeira = $mostrar[0]
+    if ($tipo -eq 2) { $dica = $primeira.Substring(0, 8) + '__' }
+    else             { $dica = $primeira.Substring(0, 1) + ($primeira.Substring(1) -replace '[^\s]', '_') }
+
+    while ($true) {
+        $resp = Read-Host $perg
+        $r = Limpar $resp
+        if ($r -eq 'SAIR') { return $null }
+        if ($r -eq '?')    { Write-Host "  Dica: $dica" -ForegroundColor DarkYellow; continue }
+        break
+    }
+
+    if ($tipo -eq 2) { $r = NormHost $resp }
+    $certas = $mostrar | ForEach-Object { Limpar $_ }
+
+    if ($certas -contains $r) {
+        Write-Host "  CERTO!" -ForegroundColor Green
+        return $true
+    }
+
+    $localTxt = if ($e.Local) { $e.Local } else { '-' }
+    Write-Host ("  ERRADO. O certo era: {0}" -f ($mostrar -join '  ou  ')) -ForegroundColor Red
+    Write-Host ("  Decore: {0}  |  {1}  |  {2}" -f $e.Host, $localTxt, $e.Nome) -ForegroundColor Yellow
+    return $false
+}
+
+# ---------- MENU ----------
+Clear-Host
+Write-Host "=== QUIZ ESTAÇÕES ===" -ForegroundColor Cyan
+Write-Host "0 - Só revisar a tabela (sem perguntas)"
+Write-Host "1 - Hostname -> Nome"
+Write-Host "2 - Nome     -> Hostname"
+Write-Host "3 - Hostname -> Local (Chassi, Wiring...)"
+Write-Host "4 - Nome     -> Local"
+Write-Host "5 - Misto (sorteia o tipo)"
+Write-Host ""
+$modo = [int](Read-Host "Escolha o modo")
+
+# ---------- Filtro por área ----------
+$areas = @($estacoes | Where-Object { $_.Local } | Select-Object -ExpandProperty Local -Unique)
+Write-Host ""
+Write-Host "Qual área quer treinar?" -ForegroundColor Cyan
+Write-Host "0 - Todas"
+for ($i = 0; $i -lt $areas.Count; $i++) {
+    Write-Host ("{0} - {1}" -f ($i + 1), $areas[$i])
+}
+Write-Host ("{0} - Sem área (Solda, PTA, Shower, IFI...)" -f ($areas.Count + 1))
+$esc = [int](Read-Host "Escolha")
+
+if     ($esc -eq 0)             { $pool = @($estacoes) }
+elseif ($esc -le $areas.Count)  { $pool = @($estacoes | Where-Object { $_.Local -eq $areas[$esc - 1] }) }
+else                            { $pool = @($estacoes | Where-Object { -not $_.Local }) }
+
+if ($modo -eq 0) {
+    MostrarTabela $pool
+    return
+}
+
+# Perguntas de "Local" só fazem sentido onde existe local
+if ($modo -eq 3 -or $modo -eq 4) {
+    $pool = @($pool | Where-Object { $_.Local })
+}
+if ($pool.Count -eq 0) {
+    Write-Host "Nenhuma estação disponível para essa combinação." -ForegroundColor Red
+    return
+}
+
+# Mostra a tabela antes de começar (para dar uma lida)
+Write-Host ""
+$ver = Read-Host "Quer ver a tabela antes de começar? (s/N)"
+if ((Limpar $ver) -eq 'S') {
+    MostrarTabela $pool
+    Read-Host "Aperte Enter para começar" | Out-Null
+}
+
+$qtd = Read-Host "Quantas estações? (Enter = todas, $($pool.Count))"
+if ($qtd -match '^\d+$' -and [int]$qtd -gt 0) { $n = [Math]::Min([int]$qtd, $pool.Count) }
+else                                          { $n = $pool.Count }
+
+# Embaralha; as que você errar voltam em ~3 perguntas até você acertar
+$fila = [System.Collections.ArrayList]@($pool | Get-Random -Count $n)
+
+$acertos = 0
+$erros   = 0
+$errosPorHost = @{}
+
+while ($fila.Count -gt 0) {
+    $e = $fila[0]
+    $fila.RemoveAt(0)
+
+    if ($modo -eq 5) {
+        if ($e.Local) { $tipo = Get-Random -InputObject 1, 2, 3, 4 }
+        else          { $tipo = Get-Random -InputObject 1, 2 }
+    }
+    else { $tipo = $modo }
+
+    Write-Host ""
+    Write-Host "[Faltam $($fila.Count + 1)]" -ForegroundColor DarkGray
+    $res = Perguntar $e $tipo
+
+    if ($null -eq $res) { break }
+
+    if ($res) { $acertos++ }
+    else {
+        $erros++
+        $errosPorHost[$e.Host] = 1 + [int]$errosPorHost[$e.Host]
+        $fila.Insert([Math]::Min(3, $fila.Count), $e)
+    }
+}
+
+# ---------- Resultado ----------
+$total = $acertos + $erros
+Write-Host ""
+Write-Host "=== FIM ===" -ForegroundColor Cyan
+if ($total -gt 0) {
+    $pct = [Math]::Round(100 * $acertos / $total)
+    Write-Host "Acertos: $acertos   Erros: $erros   ($pct% de acerto)"
+}
+
+if ($errosPorHost.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Onde você mais errou (revise essas):" -ForegroundColor Yellow
+    foreach ($par in ($errosPorHost.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 8)) {
+        $x = $estacoes | Where-Object { $_.Host -eq $par.Key } | Select-Object -First 1
+        $localTxt = if ($x.Local) { $x.Local } else { '-' }
+        Write-Host ("  {0}  |  {1}  |  {2}   (errou {3}x)" -f $x.Host, $localTxt, $x.Nome, $par.Value)
+    }
+}
