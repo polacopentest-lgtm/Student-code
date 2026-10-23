@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Analisador de log do PortConvertor</title>
+<style>
+:root{--bg:#f5f7fa;--fg:#17202a;--mut:#667085;--card:#fff;--bd:#e1e6ee;--ac:#1d5fd1;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--bar:#c7d7f5;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f141b;--fg:#e6eaf0;--mut:#93a0b4;--card:#171e28;--bd:#273142;--ac:#6aa2ff;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--bar:#27406e;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f141b;--fg:#e6eaf0;--mut:#93a0b4;--card:#171e28;--bd:#273142;--ac:#6aa2ff;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--bar:#27406e;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:20px 16px 48px}h1{font-size:22px;margin:0}h2{font-size:16px;margin:28px 0 10px}
+.sub{color:var(--mut);margin:2px 0 16px}.drop{border:2px dashed var(--bd);border-radius:14px;padding:28px;text-align:center;background:var(--card);cursor:pointer}
+.drop.on{border-color:var(--ac)}.drop b{color:var(--ac)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px 14px}.k{color:var(--mut);font-size:12px}.v{font-size:24px;font-weight:650}
+.bad{color:var(--bad)}.ok{color:var(--ok)}.warn{color:var(--warn)}.row{display:flex;gap:8px;align-items:center;font-size:13px;margin:3px 0}
+.row .n{width:230px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bar{height:12px;background:var(--bar);border-radius:6px;min-width:2px}.row .c{color:var(--mut);width:56px;text-align:right;flex:none}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:5px 8px;border-bottom:1px solid var(--bd);text-align:left}th{color:var(--mut);font-weight:500}
+.tl{max-height:300px;overflow:auto;font:12px/1.55 ui-monospace,Consolas,monospace;margin-top:8px;border-top:1px solid var(--bd);padding-top:6px}.tl div{white-space:nowrap}.tl .d{color:var(--mut)}
+.pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px;border:1px solid currentColor}pre{white-space:pre-wrap;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;font-size:12.5px}
+button{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:7px 14px;font:inherit;cursor:pointer}.scroll{overflow-x:auto}#res{display:none}@media(max-width:600px){.row .n{width:130px}}
+</style></head><body><main>
+<h1>Analisador de log do PortConvertor</h1>
+<p class="sub">GALC ⇄ PowerFocus 4000 · tudo roda neste navegador; o arquivo não é enviado a lugar nenhum.</p>
+<label class="drop" id="drop"><input type="file" id="f" hidden><b>Arraste o log aqui</b> ou clique para escolher<br><span class="sub" id="st">.log ou .txt do PortConvertor (aceita arquivos de ~10 MB)</span></label>
+<div id="res"></div>
+</main>
+<script>
+//#PURE
+const NOMES={'0001':'Abrir sessão','0002':'Sessão aberta','0004':'ERRO de comando','0005':'Comando aceito','0035':'Job info','0036':'Ack do Job info','0042':'Bloquear ferramenta','0043':'Liberar ferramenta','0060':'Assinar resultados','0061':'Resultado de aperto','0062':'Ack do resultado','9999':'Keep alive'};
+const T61={'01':4,'02':2,'03':25,'04':25,'05':2,'06':3,'07':4,'08':4,'09':1,'10':1,'11':1,'12':6,'13':6,'14':6,'15':6,'16':5,'17':5,'18':5,'19':5,'20':19,'21':19,'22':1,'23':10};
+const T35={'01':2,'02':1,'03':1,'04':4,'05':4,'06':19};
+function params(p,T){const r={};let i=0;while(i+2<=p.length){const k=p.substr(i,2);if(!(k in T))break;i+=2;if(i+T[k]>p.length)break;r[k]=p.substr(i,T[k]);i+=T[k];}return r}
+function hms(t){const d=new Date(t),z=(x,n=2)=>String(x).padStart(n,'0');return z(d.getUTCHours())+':'+z(d.getUTCMinutes())+':'+z(d.getUTCSeconds())+'.'+z(d.getUTCMilliseconds(),3)}
+function dia(t){const d=new Date(t);return String(d.getUTCDate()).padStart(2,'0')+'/'+String(d.getUTCMonth()+1).padStart(2,'0')+'/'+d.getUTCFullYear()}
+function dur(s){if(s>=3600)return Math.floor(s/3600)+'h'+String(Math.floor(s%3600/60)).padStart(2,'0')+'min';if(s>=60)return Math.floor(s/60)+'min'+String(Math.floor(s%60)).padStart(2,'0')+'s';return s.toFixed(1).replace('.',',')+'s'}
+function analisar(txt,o={}){
+ const GAP=(o.gap||15)*1000,LIM=(o.lim||60)*1000,L=txt.split(/\r?\n/),cache={},regs=[],exc=[];
+ const rm=/^Thread-(\d+),(\w+),(\w),(\d+),Output of received data\.,((?:\[[0-9a-fA-F]+\])+),(\d{4})\/(\d\d)\/(\d\d) (\d\d):(\d\d):(\d\d):(\d{3}),/;
+ const re=/^Thread-(\d+),(\w+),E,(\d+),(.*)$/,rf=/^,(\d{4})\/(\d\d)\/(\d\d) (\d\d):(\d\d):(\d\d):(\d{3}),/;let em=null;
+ L.forEach((l,i)=>{let m;
+  if(l.startsWith('Thread-')&&(m=rm.exec(l))){let c=cache[m[5]];if(!c){let b=m[5],lado='PF';if(b.startsWith('[7][9][7][9]')){lado='GALC';b=b.slice(12)}
+   const p=b.slice(1,-1).split(']['),s=p.slice(1,-2).map(x=>String.fromCharCode(parseInt(x,16))).join('');c=cache[m[5]]=[lado,s]}
+   const s=c[1],mid=s.substr(4,4),pl=s.length>20?s.slice(20):'';regs.push({t:Date.UTC(+m[6],m[7]-1,+m[8],+m[9],+m[10],+m[11],+m[12]),n:i+1,lado:c[0],mid,pl,len:s.length,dec:+s.substr(0,4)});return}
+  if(em){if(m=rf.exec(l)){exc.push({cod:em.cod,n:em.n,t:Date.UTC(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6],+m[7]),txt:em.txt.join(' | ')});em=null}else em.txt.push(l.trim());return}
+  if(m=re.exec(l))em={cod:m[2],n:i+1,txt:[m[4].trim()]}});
+ regs.sort((a,b)=>a.t-b.t||a.n-b.n);
+ const R={regs,exc,mids:{},apertos:[],sil:[],inc:[],raj:[],nok:[],porHora:{}};
+ regs.forEach(r=>{const k=r.lado+' '+r.mid;R.mids[k]=(R.mids[k]||0)+1;
+  if(r.mid==='0061'){const p=params(r.pl,T61);R.apertos.push({t:r.t,vin:(p['04']||'').trim(),job:p['05'],ps:p['06'],ok:p['09']==='1',tq:(+p['15'])/100,ang:+p['19'],st:p['10']+p['11']})}});
+ R.apertos.forEach(a=>{const h=new Date(a.t).getUTCHours();R.porHora[h]=(R.porHora[h]||0)+1;if(!a.ok)R.nok.push(a)});
+ ['PF','GALC'].forEach(ld=>{let ant=null;regs.forEach(r=>{if(r.lado!==ld)return;if(ant&&r.t-ant.t>GAP)R.sil.push({ld,de:ant.t,ate:r.t,s:(r.t-ant.t)/1000,ul:ant.mid,pr:r.mid});ant=r})});
+ let pend=null;R.kaSem=0;regs.forEach(r=>{if(r.mid!=='9999')return;if(r.lado==='GALC'){if(pend)R.kaSem++;pend=r}else pend=null});
+ const idx=t=>{let a=0,b=regs.length;while(a<b){const m=(a+b)>>1;regs[m].t<t?a=m+1:b=m}return a};
+ exc.sort((a,b)=>a.t-b.t).forEach(e=>{const i=idx(e.t);const ult=regs[i-1],lastOf=ld=>{for(let j=i-1;j>=0;j--)if(regs[j].lado===ld)return regs[j]};
+  const pf=lastOf('PF'),gl=lastOf('GALC');let ret=null;for(let j=i;j<regs.length&&regs[j].t<=e.t+3e5;j++)if(regs[j].mid==='0001'){ret=regs[j];break}
+  const sil=ult?e.t-ult.t:0;let quem='Indeterminado no log (última troca completa: GALC, PortConvertor ou log parado)';
+  if(ult&&ult.lado==='GALC'&&ult.mid==='9999'&&(!pf||pf.t<ult.t))quem='Lado COM1 (GALC chamou o keep alive e não houve resposta)';
+  else if(ult&&ult.lado==='PF'&&(ult.mid==='0061'||ult.mid==='0035'))quem='Lado TCP (a PF pediu e não houve o ack)';
+  const fila=regs.filter(r=>r.lado==='GALC'&&r.mid==='9999'&&Math.abs(r.t-e.t)<=3000).length;
+  R.inc.push({...e,ult,pf,gl,ret,sil,quem,fila,classe:sil<3e4?'Curto (parece timeout de sessão)':sil<=LIM?'Intermediário':'Possível travamento (silêncio longo)',
+   janela:regs.filter(r=>r.t>=e.t-6e4&&r.t<=e.t+3e4)})});
+ let cur=null;regs.filter(r=>r.mid==='0035'&&r.lado==='PF').forEach(r=>{const p=params(r.pl,T35);const k=r.pl.slice(0,20);
+  if(cur&&cur.k===k&&r.t-cur.f[cur.f.length-1]<15e3)cur.f.push(r.t);else{cur={k,f:[r.t],job:p['01'],st:p['02'],cont:+p['05'],meta:+p['04']};R.raj.push(cur)}});
+ R.t0=regs.length?regs[0].t:0;R.t1=regs.length?regs[regs.length-1].t:0;R.ack36=R.mids['GALC 0036']||0;
+ R.resumo=resumo(R);return R}
+function resumo(R){const o=['Data: '+dia(R.t0),'SYSUT083 encontrados: '+R.exc.length];
+ R.inc.forEach((i,k)=>{o.push('','Erro '+(k+1)+':','  Última comunicação: '+(i.ult?hms(i.ult.t)+' ('+i.ult.lado+' MID '+i.ult.mid+')':'-'),'  Erro: '+hms(i.t)+' ('+i.cod+', linha '+i.n+')',
+  '  Retorno: '+(i.ret?hms(i.ret.t):'-'),'  Silêncio antes do erro: '+dur(i.sil/1000)+' → '+i.classe,'  Quem calou primeiro (indício): '+i.quem)});
+ if(R.inc.length)o.push('','Conclusão (automática, apenas indício): o log não prova quem parou primeiro, porque o PortConvertor registra os dois lados.');return o.join('\n')}
+//#END
+const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function bars(obj,fmt){const m=Math.max(1,...Object.values(obj));return Object.entries(obj).map(([k,v])=>`<div class="row"><span class="n">${esc(fmt?fmt(k):k)}</span><div class="bar" style="width:${Math.max(2,v/m*100)}%;flex:none;max-width:calc(100% - 300px)"></div><span class="c">${v}</span></div>`).join('')}
+function ver(R){const ok=R.apertos.filter(a=>a.ok).length,nk=R.nok.length;
+ const kp=(k,v,c='')=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`;
+ let h=`<h2>Visão geral</h2><div class="grid">${kp('Mensagens',R.regs.length.toLocaleString('pt-BR'))}${kp('Período',dia(R.t0)+'<div class="k">'+hms(R.t0).slice(0,8)+' a '+hms(R.t1).slice(0,8)+'</div>')}${kp('Apertos OK / NOK',ok+' / <span class="'+(nk?'warn':'')+'">'+nk+'</span>')}${kp('Erros SYSUT083',R.exc.length,R.exc.length?'bad':'ok')}${kp('Silêncios > 15 s',R.sil.length,R.sil.length?'warn':'ok')}${kp('Keep alive sem resposta',R.kaSem,R.kaSem?'warn':'ok')}</div>`;
+ h+='<h2>Incidentes (1 por erro SYSUT083)</h2>';if(!R.inc.length)h+='<div class="card ok">Nenhum erro SYSUT083 neste arquivo.</div>';
+ R.inc.forEach((i,k)=>{const lg=i.sil>6e4;h+=`<div class="card" style="margin-bottom:10px"><b>Erro ${k+1}</b> · ${i.cod} · linha ${i.n} <span class="pill ${lg?'warn':''}" style="float:right">${esc(i.classe)}</span>
+ <table><tr><th>Última comunicação</th><th>Erro</th><th>Retorno (0001)</th><th>Silêncio</th><th>Silêncio só da PF</th></tr><tr><td>${i.ult?hms(i.ult.t)+' · '+i.ult.lado+' '+i.ult.mid:'-'}</td><td class="bad">${hms(i.t)}</td><td>${i.ret?hms(i.ret.t)+' (+'+dur((i.ret.t-i.t)/1000)+')':'-'}</td><td>${dur(i.sil/1000)}</td><td>${i.pf?dur((i.t-i.pf.t)/1000):'-'}</td></tr></table>
+ <div class="k" style="margin-top:6px">Quem calou primeiro (indício): ${esc(i.quem)} · 9999 do GALC a ±3 s do erro: ${i.fila}</div>
+ <div class="tl">${i.janela.map(r=>`<div class="${r.mid==='9999'?'d':''}">${hms(r.t)}  ${r.lado==='GALC'?'GALC → PF':'PF → GALC'}  ${r.mid}  ${esc(NOMES[r.mid]||'')}</div>`).join('')}<div class="bad">${hms(i.t)}  *** java.lang.Exception (${i.cod}) ***</div></div></div>`});
+ h+='<h2>Mensagens por lado e MID</h2><div class="card">'+bars(Object.fromEntries(Object.entries(R.mids).sort((a,b)=>b[1]-a[1])),k=>k+' · '+(NOMES[k.slice(-4)]||''))+'</div>';
+ h+='<h2>Apertos por hora</h2><div class="card">'+(R.apertos.length?bars(R.porHora,k=>String(k).padStart(2,'0')+'h'):'Nenhum resultado de aperto (MID 0061).')+'</div>';
+ if(nk)h+='<h2>Apertos NOK</h2><div class="card scroll"><table><tr><th>Hora</th><th>VIN</th><th>Job/PSet</th><th>Torque</th><th>Ângulo</th></tr>'+R.nok.map(a=>`<tr><td>${hms(a.t)}</td><td>${esc(a.vin)}</td><td>${a.job}/${a.ps}</td><td>${a.tq.toFixed(2).replace('.',',')} Nm</td><td>${a.ang}°</td></tr>`).join('')+'</table></div>';
+ h+='<h2>Silêncios (lado sem falar por mais de 15 s)</h2><div class="card scroll">'+(R.sil.length?'<table><tr><th>Lado</th><th>De</th><th>Até</th><th>Duração</th></tr>'+R.sil.map(s=>`<tr><td>${s.ld}</td><td>${hms(s.de)}</td><td>${hms(s.ate)}</td><td class="warn">${dur(s.s)}</td></tr>`).join('')+'</table>':'Nenhum.')+'</div>';
+ if(R.raj.length)h+=`<h2>Job info (MID 0035)</h2><div class="card">${R.raj.map(j=>`Job ${j.job} · status ${j.st} (${j.st==='2'?'reprovado/NOK':j.st==='1'?'OK':'em andamento'}) · lote ${j.cont} de ${j.meta} · <b>${j.f.length} envios</b> a partir de ${hms(j.f[0])}`).join('<br>')}<div class="k">Ack do GALC (MID 0036) no arquivo: ${R.ack36}</div></div>`;
+ h+='<h2>Resumo para relatório</h2><pre id="rs">'+esc(R.resumo)+'</pre><button id="cp">Copiar resumo</button> <span class="k" id="cpm"></span>';
+ $('#res').innerHTML=h;$('#res').style.display='block';
+ $('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(R.resumo);$('#cpm').textContent='Copiado.'}catch(e){const r=document.createRange();r.selectNodeContents($('#rs'));getSelection().removeAllRanges();getSelection().addRange(r);$('#cpm').textContent='Texto selecionado: use Ctrl+C.'}}}
+function ler(file){if(!file)return;$('#st').textContent='Lendo '+file.name+'…';file.text().then(t=>{setTimeout(()=>{const R=analisar(t);if(!R.regs.length){$('#st').textContent='Nenhuma mensagem do PortConvertor reconhecida em '+file.name+'.';return}$('#st').textContent=file.name+' · '+R.regs.length.toLocaleString('pt-BR')+' mensagens';ver(R)},30)})}
+const dz=$('#drop');$('#f').onchange=e=>ler(e.target.files[0]);['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('on')}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('on')}));dz.addEventListener('drop',e=>ler(e.dataTransfer.files[0]));
+</script></body></html>
