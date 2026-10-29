@@ -1,0 +1,18 @@
+$o="C:\Temp\NAM_$env:COMPUTERNAME.txt"; New-Item C:\Temp -ItemType Directory -Force | Out-Null
+$ac="C:\Program Files (x86)\Cisco\Cisco AnyConnect Secure Mobility Client"
+$s="C:\ProgramData\Cisco\Cisco AnyConnect Secure Mobility Client\Network Access Manager\system"
+& {
+"== MODELO / WINDOWS"; (Get-CimInstance Win32_ComputerSystem).Model
+(Get-CimInstance Win32_OperatingSystem | % {"$($_.Caption) $($_.Version)"})
+"== ADAPTADORES"; Get-NetAdapter -Physical | Select Name,InterfaceDescription,DriverVersion,DriverDate,Status | ft -auto | Out-String
+"== BINDING NAM"; Get-NetAdapterBinding | ? DisplayName -like "*AnyConnect*" | Select Name,Enabled | ft -auto | Out-String
+"== SERVICOS"; Get-Service nam,wlansvc,dot3svc | Select Name,Status,StartType | ft -auto | Out-String
+"== DRIVER acnamfd"; sc.exe query acnamfd
+"== ANYCONNECT INSTALADO"; Get-ItemProperty HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*,HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* | ? DisplayName -like "*AnyConnect*" | Select DisplayName,DisplayVersion,InstallDate | ft -auto | Out-String
+"== DLLs ISE"; Test-Path "$ac\acisectrl.dll"; Test-Path "$ac\aciseshim.dll"
+"== PERFIL NAM"; Get-ChildItem $s -Recurse | Select FullName,Length,LastWriteTime | ft -auto | Out-String
+Get-FileHash "$s\configuration.xml","$s\internalConfiguration.xml" | Select Hash,Path | ft -auto | Out-String
+"== REINICIO PENDENTE"; Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+"== LOG NAM (sem ruido)"; Get-WinEvent -LogName Application -MaxEvents 5000 -EA SilentlyContinue | ? { $_.ProviderName -like 'NAM*' -and $_.Message -notmatch 'ServiceControlHandlerEx|timer expired' } | Select -First 15 TimeCreated,Message | fl | Out-String
+} | Tee-Object $o
